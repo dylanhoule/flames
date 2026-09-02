@@ -13,9 +13,9 @@ import { mulberry32, range } from './rng'
 import type { FireSim, Forest, Species, TerrainField, Wind } from './types'
 import { BURNING, CHARRED } from './types'
 import {
-  BACKDROP, BURN, CAMERA, CLIFF_COLOR, FOLIAGE, LIGHTS, POST, TREE_JITTER, TRUNK, WATER,
+  BACKDROP, BURN, CAMERA, CLIFF_COLOR, FIRE_LIGHT, FOLIAGE, LIGHTS, POST, TREE_JITTER, TRUNK, WATER,
 } from './visual'
-import { BURN_SHADING_GLSL } from './burnShading'
+import { BURN_SHADING_GLSL, burnIntensity, glslColor } from './burnShading'
 
 /** Height of a tree in world units, before per-instance jitter. */
 const BASE_TREE_HEIGHT = 7
@@ -49,6 +49,7 @@ export function Scene({ terrain, forest, sim, wind, seed, onIgnite, clock }: Sce
       }}
     >
       <Lighting />
+      <FireLights forest={forest} sim={sim} />
       <SimDriver sim={sim} clock={clock} />
       <Slab terrain={terrain} forest={forest} sim={sim} />
       <Water terrain={terrain} />
@@ -109,6 +110,141 @@ function SimDriver({ sim, clock }: { sim: FireSim | null; clock?: { elapsed: num
   return null
 }
 
+/**
+ * The fire's contribution to the scene lighting.
+ *
+ * Emissive material plus a bloom pass makes a glowing object, not a fire:
+ * nothing around it changes. These lights are what put orange onto the terrain
+ * and onto the unburnt trees beside the front, which is most of the difference
+ * between "the trees are lit up" and "the forest is on fire".
+ *
+ * The pool is a FIXED size for the life of the scene and idle lights are driven
+ * to zero intensity rather than unmounted. Adding or removing a light changes
+ * three's NUM_POINT_LIGHTS define, which recompiles every material in the
+ * scene; doing that as the fire grows would hitch exactly when the most is
+ * happening on screen. None cast shadows: six shadow-casting lights would cost
+ * six extra shadow passes a frame for an effect the key light already gives.
+ */
+function FireLights({ forest, sim }: { forest: Forest; sim: FireSim | null }) {
+  const group = useRef<THREE.Group>(null)
+
+  // Targets are plain numbers rather than Vector3s so this allocates nothing
+  // per frame; the lights themselves are found by walking the group's children
+  // rather than through an array of refs, which keeps mounting and updating
+  // from having to agree about indices.
+  const targets = useMemo(
+    () => Array.from({ length: FIRE_LIGHT.count }, () => ({
+      x: 0, y: 0, z: 0, intensity: 0, placed: false,
+    })),
+    [],
+  )
+  const sinceRetarget = useRef(0)
+
+  useFrame((_, rawDelta) => {
+    const g = group.current
+    if (!g || !sim) return
+    const delta = Math.min(rawDelta, 0.1)
+
+    sinceRetarget.current += delta
+    if (sinceRetarget.current >= FIRE_LIGHT.retargetSeconds) {
+      sinceRetarget.current = 0
+      retarget(forest, sim, targets)
+    }
+
+    // Lights glide toward their targets rather than snapping. Framing the
+    // approach as 1 - exp(-rate * dt) keeps the motion frame-rate independent,
+    // which a raw lerp(a, b, rate * dt) would not be.
+    const k = 1 - Math.exp(-FIRE_LIGHT.followRate * delta)
+    for (let i = 0; i < g.children.length; i++) {
+      const light = g.children[i] as THREE.PointLight
+      const t = targets[i]
+      if (!t) continue
+      if (t.placed) {
+        // A light with nothing to light keeps its last position while it fades,
+        // so it dims in place instead of sliding across the diorama.
+        light.position.x += (t.x - light.position.x) * k
+        light.position.y += (t.y - light.position.y) * k
+        light.position.z += (t.z - light.position.z) * k
+      }
+      light.intensity += (t.intensity - light.intensity) * k
+    }
+  })
+
+  return (
+    <group ref={group}>
+      {Array.from({ length: FIRE_LIGHT.count }, (_, i) => (
+        <pointLight
+          key={i}
+          color={FIRE_LIGHT.color}
+          intensity={0}
+          distance={FIRE_LIGHT.distance}
+          decay={FIRE_LIGHT.decay}
+        />
+      ))}
+    </group>
+  )
+}
+
+/**
+ * Point each light at a hot cluster of burning cells.
+ *
+ * Greedy seed-and-claim rather than a real clustering pass: take the hottest
+ * unclaimed cell, absorb everything within clusterRadius of it into that
+ * light's cluster, repeat for the next light. It is O(burning * count) with
+ * count fixed at six, needs no iteration to converge, and above all is STABLE
+ * frame to frame, which k-means from a random seed is not. An unstable
+ * assignment has lights trading places between frames and the whole diorama
+ * strobes.
+ */
+function retarget(
+  forest: Forest,
+  sim: FireSim,
+  targets: Array<{ x: number; y: number; z: number; intensity: number; placed: boolean }>,
+): void {
+  const hot: Array<{ x: number; y: number; z: number; w: number }> = []
+  for (const cell of forest.cells) {
+    if (sim.states[cell.id] !== BURNING) continue
+    const w = burnIntensity(sim.progress[cell.id] ?? 0)
+    if (w <= 0.01) continue
+    hot.push({ x: cell.position[0], y: cell.position[1], z: cell.position[2], w })
+  }
+  hot.sort((a, b) => b.w - a.w)
+
+  const claimed = new Uint8Array(hot.length)
+  const sepSq = FIRE_LIGHT.clusterRadius * FIRE_LIGHT.clusterRadius
+  let next = 0
+
+  for (const target of targets) {
+    while (next < hot.length && claimed[next]) next++
+    if (next >= hot.length) { target.intensity = 0; continue }
+
+    // Weighted centroid of the seed and its neighbours, so the light sits in
+    // the middle of a burning patch rather than on whichever single cell
+    // happened to sort first.
+    const s = hot[next]!
+    let sx = 0, sy = 0, sz = 0, sw = 0
+    for (let h = next; h < hot.length; h++) {
+      if (claimed[h]) continue
+      const c = hot[h]!
+      const dx = c.x - s.x
+      const dz = c.z - s.z
+      if (dx * dx + dz * dz > sepSq) continue
+      claimed[h] = 1
+      sx += c.x * c.w; sy += c.y * c.w; sz += c.z * c.w; sw += c.w
+    }
+    if (sw <= 0) { target.intensity = 0; continue }
+
+    target.x = sx / sw
+    target.y = sy / sw + FIRE_LIGHT.lift
+    target.z = sz / sw
+    target.placed = true
+    // Saturating rather than linear in cluster weight: a 40-cell blaze should
+    // be brighter than a 4-cell one but not ten times brighter, or a mature
+    // fire blows out the whole slab.
+    target.intensity = FIRE_LIGHT.intensity * (1 - Math.exp(-sw / FIRE_LIGHT.weightScale))
+  }
+}
+
 function Lighting() {
   return (
     <>
@@ -160,13 +296,17 @@ function Slab({
   // is the expensive part and charring is rare relative to the frame rate.
   const stamped = useRef<Set<number>>(new Set())
   useEffect(() => { stamped.current = new Set(); scorch.clear() }, [scorch])
-  useFrame(() => {
+  useFrame((_, rawDelta) => {
     if (!sim) return
     for (const cell of forest.cells) {
       if (sim.states[cell.id] !== CHARRED || stamped.current.has(cell.id)) continue
       stamped.current.add(cell.id)
       scorch.stamp(cell.position[0], cell.position[2])
     }
+    // Cooling runs every frame so the trailing edge fades smoothly. It sweeps
+    // only the rect that currently holds heat, and costs nothing once the last
+    // of it has gone out.
+    scorch.decayHeat(Math.min(rawDelta, 0.1))
   })
 
   return (
@@ -547,15 +687,21 @@ function burnMaterialImpl(shrink: boolean) {
       .replace(
         '#include <dithering_fragment>',
         `#include <dithering_fragment>
-         // --- preheat: dry, dull, no flame yet (item 5) ---------------
+         vec3 ash = ${glslColor(BURN.ramp.ash)};
+
+         // --- preheat: dry, dull, no flame yet -------------------------
          // Desaturate toward a dry yellow-brown so ignition reads as having
          // a cause (the tree visibly dries out) rather than jumping
          // straight from green to fire. Faded back out once burnT (below)
          // says this fragment is actually alight or already past.
          float preheatT = smoothstep(0.0, ${f(BURN.preheatEnd)}, vBurn);
          float gray = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
-         vec3 dry = vec3(gray) * vec3(1.15, 0.82, 0.5);
-         gl_FragColor.rgb = mix(gl_FragColor.rgb, dry, preheatT * 0.7);
+         // Desaturate PART of the way toward a dry brown and darken slightly,
+         // rather than replacing the colour with a grey. Mixing to vec3(gray)
+         // at full strength threw the foliage hue away entirely and every tree
+         // ahead of the front read as snow-covered rather than as drying out.
+         vec3 dry = mix(gl_FragColor.rgb, vec3(gray), 0.55) * vec3(0.95, 0.82, 0.58);
+         gl_FragColor.rgb = mix(gl_FragColor.rgb, dry, preheatT * ${f(BURN.preheatTint)});
 
          // --- height-driven front (item 1) -----------------------------
          // d > 0: above the front, still green. d < 0: at or below it.
@@ -573,7 +719,12 @@ function burnMaterialImpl(shrink: boolean) {
          // point on the tree, and the same fragment during smoulder (front
          // long past, act intensity low) is dim even though d is unchanged.
          float intensity = burnIntensity(vBurn);
-         float heat = clamp(1.0 - abs(d), 0.0, 1.0) * intensity;
+         // Squared falloff rather than linear: with a linear ramp the whole
+         // front band sat near 1.0 and tone-mapped to a flat white blob. This
+         // keeps the white cap to the very centre of the front, which is what
+         // makes it read as heat rather than as blown-out exposure.
+         float prox = clamp(1.0 - abs(d), 0.0, 1.0);
+         float heat = prox * prox * intensity;
 
          // --- ember cracks in the char (item 3) -------------------------
          // Object-space position is identical across instances (shared
@@ -589,7 +740,11 @@ function burnMaterialImpl(shrink: boolean) {
          float pulse = 0.6 + 0.4 * sin(uTime * ${f(BURN.crackPulseHz * 6.28318530718)} + vSeed * 17.0);
          float smoulderT = smoothstep(${f(BURN.sustainEnd)}, 1.0, vBurn);
          float belowFront = clamp(-d, 0.0, 1.0);
-         float crackHeat = crack * pulse * mix(1.0, 0.5, smoulderT) * step(0.001, belowFront);
+         // Scaled well below 1: a crack is a glowing vein of charcoal, not a
+         // flame core. Left at full strength every crack fragment reached the
+         // white end of the blackbody ramp and the char read as white blobs.
+         float crackHeat = crack * pulse * mix(1.0, 0.5, smoulderT)
+           * step(0.001, belowFront) * ${f(BURN.crackHeat)};
 
          // --- multi-octave flicker, per-instance phase (item 6) --------
          // Two sines at different rate and per-tree phase (vSeed), summed,
@@ -600,8 +755,14 @@ function burnMaterialImpl(shrink: boolean) {
            + ${f(BURN.flickerDepth * 0.6)} * sin(uTime * ${f(BURN.flickerHz)} + vSeed * 41.0)
            + ${f(BURN.flickerDepth * 0.4)} * sin(uTime * ${f(BURN.flickerHz * 2.3)} + vSeed * 7.0 + vHeight * 3.0);
 
-         vec3 hot = blackbody(clamp(heat + crackHeat, 0.0, 1.0)) * ${f(BURN.emissivePeak)} * flicker;
-         gl_FragColor.rgb = mix(gl_FragColor.rgb, hot, clamp(burnT + crackHeat, 0.0, 1.0));`,
+         float temp = clamp(max(heat, crackHeat), 0.0, 1.0);
+         vec3 hot = blackbody(temp) * ${f(BURN.emissivePeak)} * flicker;
+         // Char first (the tree darkens wherever the front has passed), then
+         // heat added on top. Mixing toward the hot colour instead let a
+         // bright crack wipe out the char under it and the aftermath lost
+         // its shape.
+         gl_FragColor.rgb = mix(gl_FragColor.rgb, ash, burnT);
+         gl_FragColor.rgb += hot * temp;`,
       )
   }
 

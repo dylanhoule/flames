@@ -33,10 +33,15 @@ export const BACKDROP = {
 export const LIGHTS = {
   /** High key, crisp facet definition and the shadow caster. */
   key: { color: '#fff4e0', intensity: 2.6, position: [40, 70, 30] },
-  /** Cool fill from the opposite side so shadowed facets keep their shape. */
-  fill: { color: '#8fb2d9', intensity: 0.7, position: [-45, 25, -35] },
-  /** Lifts everything off the dark backdrop. */
-  ambient: { color: '#5a6a7d', intensity: 0.55 },
+  /**
+   * Cool fill from the opposite side so shadowed facets keep their shape.
+   * Trimmed from 0.7 when the fire gained real point lights: the fill was
+   * competing with the orange bounce and washing it out of the shadows, which
+   * is exactly where fire light should be most visible.
+   */
+  fill: { color: '#8fb2d9', intensity: 0.55, position: [-45, 25, -35] },
+  /** Lifts everything off the dark backdrop. Trimmed alongside fill. */
+  ambient: { color: '#5a6a7d', intensity: 0.42 },
 } as const
 
 /**
@@ -58,6 +63,16 @@ export const FIRE_LIGHT = {
   followRate: 3.5,
   /** Seconds between re-clustering passes. Lights glide between targets. */
   retargetSeconds: 0.25,
+  /** World-unit radius of one light's cluster of burning cells. */
+  clusterRadius: 22,
+  /** Height above the cluster centroid the light sits at. */
+  lift: 5,
+  /**
+   * Summed cluster weight at which a light reaches ~63% of peak intensity.
+   * The response saturates, so a large blaze is brighter than a small one
+   * without being proportionally brighter, which would blow out the slab.
+   */
+  weightScale: 6,
 } as const
 
 // ---------------------------------------------------------------- terrain
@@ -203,12 +218,26 @@ export const BURN = {
   /** Noise above this reads as a crack. Higher means fewer, sparser veins. */
   crackThreshold: 0.62,
   crackPulseHz: 0.9,
+  /**
+   * How far up the blackbody ramp an ember crack reaches. Deliberately low:
+   * a crack is glowing charcoal, not a flame core, and at full strength every
+   * crack fragment hit the white cap and the char read as white blobs.
+   */
+  crackHeat: 0.42,
+
+  /** Strength of the dry-brown preheat tint, 0..1. */
+  preheatTint: 0.3,
 
   /** Radians a crown slumps by at full char, so the aftermath reads structurally. */
   settleRad: 0.22,
 
-  /** Emissive multiplier at peak burn, pre-tone-mapping. */
-  emissivePeak: 2.4,
+  /**
+   * Emissive multiplier at peak burn, pre-tone-mapping. Cut from 2.4 once the
+   * fire gained real point lights: the material no longer has to carry the
+   * whole impression of brightness on its own, and at 2.4 the front saturated
+   * to white across its full width instead of only at its core.
+   */
+  emissivePeak: 1.5,
   /** Flicker depth and rate for the per-instance emissive noise. */
   flickerDepth: 0.35,
   flickerHz: 7.0,
@@ -227,11 +256,18 @@ export const FLAME = {
   /** World units of sideways lean at the flame tip, per m/s of wind. */
   windLean: 0.38,
   /** Base height in world units at full intensity, before per-tongue jitter. */
-  height: 3.4,
+  height: 4.2,
   /** Spread of tongue anchors around the cell centre, world units. */
-  spread: 0.9,
-  /** How far above the cell's ground position the flames sit. */
-  lift: 2.6,
+  spread: 1.1,
+  /**
+   * How far above the cell's ground position the flames are anchored.
+   * Trees stand about 7 units with a canopy filling roughly 2 to 7, so the
+   * old 2.6 buried every flame INSIDE its own crown, where the depth test
+   * discarded it: only trees with unusually small canopies showed a flame at
+   * all. Anchoring near the top of the crown puts the tongues where a crown
+   * fire actually burns and lets them lick clear of the foliage.
+   */
+  lift: 5.4,
 } as const
 
 /**
@@ -272,9 +308,16 @@ export const SMOKE = {
 // -------------------------------------------------------------------- post
 
 export const POST = {
-  bloomThreshold: 1.0,
-  bloomIntensity: 1.3,
-  bloomRadius: 0.55,
+  /**
+   * Raised from 1.0 with the blackbody ramp: white-hot flame cores and the
+   * burn front now push well past 1, so the old threshold caught the merely
+   * warm parts of the fire too and the whole burn smeared. Higher means bloom
+   * picks out the genuinely hot core and the embers, and leaves the cooling
+   * char alone.
+   */
+  bloomThreshold: 1.35,
+  bloomIntensity: 1.15,
+  bloomRadius: 0.6,
   vignette: 0.42,
 } as const
 

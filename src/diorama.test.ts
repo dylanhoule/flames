@@ -140,3 +140,26 @@ describe('scorch map', () => {
     expect(scorch.sample(0, 0)).toBe(0)
   })
 })
+
+describe('ScorchMap heat', () => {
+  it('stamps heat that cools toward zero over time', () => {
+    const map = new ScorchMap(100)
+    map.stamp(0, 0)
+    const fresh = map.sampleHeat(0, 0)
+    expect(fresh).toBeGreaterThan(0)
+
+    // Several seconds of cooling should take it well down but the darkening
+    // it was stamped alongside must be untouched: the scar is permanent, only
+    // the glow fades.
+    const darkBefore = map.sample(0, 0)
+    for (let i = 0; i < 60; i++) map.decayHeat(0.1)
+    expect(map.sampleHeat(0, 0)).toBeLessThan(fresh * 0.5)
+    expect(map.sample(0, 0)).toBe(darkBefore)
+  })
+
+  it('leaves heat at zero outside the heat radius', () => {
+    const map = new ScorchMap(100)
+    map.stamp(0, 0)
+    expect(map.sampleHeat(40, 40)).toBe(0)
+  })
+})

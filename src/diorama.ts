@@ -217,6 +217,13 @@ export class ScorchMap {
   private readonly data: Uint8Array
   private readonly size: number
 
+  // Bounding box of texels that currently hold heat, so decayHeat sweeps a
+  // rect rather than the whole map. Inverted (i1 < i0) means "no heat".
+  private hotI0 = SCORCH_RES
+  private hotI1 = -1
+  private hotJ0 = SCORCH_RES
+  private hotJ1 = -1
+
   constructor(size: number) {
     this.size = size
     this.data = new Uint8Array(SCORCH_RES * SCORCH_RES * 4)
@@ -226,6 +233,51 @@ export class ScorchMap {
     this.texture.wrapS = THREE.ClampToEdgeWrapping
     this.texture.wrapT = THREE.ClampToEdgeWrapping
     this.texture.needsUpdate = true
+  }
+
+  /**
+   * Fade the residual heat in the green channel.
+   *
+   * Only the dirty rect that has ever been stamped is swept, not all 65k
+   * texels: the fire touches a small part of the map early on and the scar
+   * only ever grows, so tracking one bounding box keeps the common case cheap
+   * without needing a throttle that would make the cooling visibly steppy.
+   * Once heat everywhere has reached zero the rect resets and the sweep costs
+   * nothing at all, which is the state the map spends most of a session in.
+   */
+  decayHeat(dt: number): void {
+    if (this.hotI1 < this.hotI0) return
+    const keep = Math.max(0, 1 - SCORCH.heatDecayPerSecond * dt)
+    let anyHeat = false
+    for (let j = this.hotJ0; j <= this.hotJ1; j++) {
+      for (let i = this.hotI0; i <= this.hotI1; i++) {
+        const idx = (j * SCORCH_RES + i) * 4 + 1
+        const v = this.data[idx]!
+        if (v === 0) continue
+        // Floor at zero rather than letting it asymptote: an 8-bit channel
+        // holding 1 forever would keep the whole rect permanently dirty.
+        const next = v * keep
+        this.data[idx] = next < 1 ? 0 : next
+        if (next >= 1) anyHeat = true
+      }
+    }
+    if (!anyHeat) {
+      this.hotI0 = SCORCH_RES
+      this.hotI1 = -1
+      this.hotJ0 = SCORCH_RES
+      this.hotJ1 = -1
+    }
+    this.texture.needsUpdate = true
+  }
+
+  /** Value of the heat channel at a world position, 0..1. Exposed for tests. */
+  sampleHeat(x: number, z: number): number {
+    const half = this.size / 2
+    const perUnit = SCORCH_RES / this.size
+    const i = Math.round((x + half) * perUnit)
+    const j = Math.round((z + half) * perUnit)
+    if (i < 0 || j < 0 || i >= SCORCH_RES || j >= SCORCH_RES) return 0
+    return this.data[(j * SCORCH_RES + i) * 4 + 1]! / 255
   }
 
   /** Darken a soft disc around a world xz position. Idempotent-ish: keeps the max. */
@@ -242,6 +294,12 @@ export class ScorchMap {
     const j0 = Math.max(0, Math.floor(cz - r))
     const j1 = Math.min(SCORCH_RES - 1, Math.ceil(cz + r))
 
+    // Heat rides in the green channel of the same texture. It is a tighter
+    // disc than the darkening on purpose: the glow should read as a rim on
+    // the advancing front, not as a pool under the whole burnt area.
+    const hr = SCORCH.heatRadius * perUnit
+    const heatPeak = SCORCH.heatStrength * 255
+
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
         const d = Math.hypot(i - cx, j - cz) / r
@@ -254,8 +312,23 @@ export class ScorchMap {
           this.data[idx] = v
           this.data[idx + 3] = 255
         }
+
+        const hd = Math.hypot(i - cx, j - cz) / hr
+        if (hd >= 1) continue
+        const hv = heatPeak * (1 - hd) * (1 - hd)
+        if (hv > this.data[idx + 1]!) {
+          this.data[idx + 1] = hv
+          this.data[idx + 3] = 255
+        }
       }
     }
+
+    // Grow the dirty rect to cover the heat disc just written.
+    this.hotI0 = Math.min(this.hotI0, Math.max(0, Math.floor(cx - hr)))
+    this.hotI1 = Math.max(this.hotI1, Math.min(SCORCH_RES - 1, Math.ceil(cx + hr)))
+    this.hotJ0 = Math.min(this.hotJ0, Math.max(0, Math.floor(cz - hr)))
+    this.hotJ1 = Math.max(this.hotJ1, Math.min(SCORCH_RES - 1, Math.ceil(cz + hr)))
+
     this.texture.needsUpdate = true
   }
 
@@ -271,6 +344,10 @@ export class ScorchMap {
 
   clear(): void {
     this.data.fill(0)
+    this.hotI0 = SCORCH_RES
+    this.hotI1 = -1
+    this.hotJ0 = SCORCH_RES
+    this.hotJ1 = -1
     this.texture.needsUpdate = true
   }
 
@@ -293,6 +370,7 @@ export function applyScorch(
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uScorch = { value: scorch.texture }
     shader.uniforms.uScorchColor = { value: new THREE.Color(SCORCH.color) }
+    shader.uniforms.uHeatColor = { value: new THREE.Color(SCORCH.heatColor) }
     shader.uniforms.uFootprint = { value: size }
 
     shader.vertexShader = shader.vertexShader
@@ -308,6 +386,7 @@ export function applyScorch(
         `#include <common>
          uniform sampler2D uScorch;
          uniform vec3 uScorchColor;
+         uniform vec3 uHeatColor;
          uniform float uFootprint;
          varying vec3 vWorld;`,
       )
@@ -315,8 +394,14 @@ export function applyScorch(
         '#include <color_fragment>',
         `#include <color_fragment>
          vec2 scorchUv = (vWorld.xz / uFootprint) + 0.5;
-         float scorch = texture2D(uScorch, scorchUv).r;
-         diffuseColor.rgb = mix(diffuseColor.rgb, uScorchColor, clamp(scorch, 0.0, 1.0));`,
+         vec4 scorchTex = texture2D(uScorch, scorchUv);
+         float scorch = scorchTex.r;
+         diffuseColor.rgb = mix(diffuseColor.rgb, uScorchColor, clamp(scorch, 0.0, 1.0));
+         // Residual heat, green channel. Added rather than mixed so it reads
+         // as the ground glowing rather than as another paint colour, and so
+         // it clears the bloom threshold where it is strongest.
+         float heat = clamp(scorchTex.g, 0.0, 1.0);
+         diffuseColor.rgb += uHeatColor * heat * heat * ${SCORCH.heatStrength.toFixed(3)};`,
       )
   }
   // Without this, three caches compiled programs by material parameters and
