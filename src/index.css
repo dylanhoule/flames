@@ -1,0 +1,8 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: #141619;
+  color: #e6e9ec;
+  overflow: hidden;
+}

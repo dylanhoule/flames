@@ -1,2 +1,10 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+
+# Local-only working notes. context/ABOUT.md, ARCHITECTURE.md and DECISIONS.md
+# are already tracked, so they stay versioned; this keeps NEW context files,
+# including context/learning/, out of the repo.
 /context
-/learning
+/context/learning
