@@ -27,6 +27,7 @@ export interface DioramaGeometry {
   bottomY: number
 }
 
+
 export function buildDiorama(terrain: TerrainField): DioramaGeometry {
   const { heightmap } = terrain
   let minH = Infinity
@@ -43,6 +44,7 @@ export function buildDiorama(terrain: TerrainField): DioramaGeometry {
     bottomY,
   }
 }
+
 
 /** World position of a heightmap grid node. */
 function nodeAt(terrain: TerrainField, ix: number, iz: number): THREE.Vector3 {

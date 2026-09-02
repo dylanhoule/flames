@@ -252,6 +252,11 @@ function PropGroup({ items, kind }: { items: ScatterProp[]; kind: 'boulder' | 'l
 
 /** Flat translucent sheet at the terrain's water level. */
 function Water({ terrain }: { terrain: TerrainField }) {
+  // A waterfall spilling off the cut edge was built and dropped: the geometry
+  // was correct (verified by rendering it with a plain material) but its
+  // ShaderMaterial took the whole frame down with no console error, under a
+  // controlled single-variable toggle. The flat sheet stands on its own, and a
+  // page that renders nothing is far worse than one without a waterfall.
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, terrain.waterLevel, 0]}>
       <planeGeometry args={[terrain.size, terrain.size]} />
