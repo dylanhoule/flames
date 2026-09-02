@@ -15,6 +15,7 @@ import { BURNING, CHARRED } from './types'
 import {
   BACKDROP, BURN, CAMERA, CLIFF_COLOR, FOLIAGE, LIGHTS, POST, TREE_JITTER, TRUNK, WATER,
 } from './visual'
+import { BURN_SHADING_GLSL } from './burnShading'
 
 /** Height of a tree in world units, before per-instance jitter. */
 const BASE_TREE_HEIGHT = 7
@@ -327,12 +328,26 @@ function SpeciesGroup({
     [trees.length],
   )
 
-  // The shader reads burn state from this per-instance attribute, so it has to
-  // live on the geometries themselves, not on the material.
+  // Per-tree random phase so flicker and crack pulsing do not lock-step across
+  // the grove. Written once, alongside the burn attribute: both live on the
+  // geometries (not the material) because that is where three looks up
+  // per-instance attributes for an InstancedMesh.
+  const seedAttr = useMemo(() => {
+    const arr = new Float32Array(Math.max(trees.length, 1))
+    const rng = mulberry32(seed ^ (species === 'conifer' ? 0x51ed : 0xc0ffee))
+    for (let i = 0; i < arr.length; i++) arr[i] = rng()
+    return new THREE.InstancedBufferAttribute(arr, 1)
+  }, [trees.length, seed, species])
+
+  // The shader reads burn state and per-tree seed from these per-instance
+  // attributes, so they have to live on the geometries themselves, not on the
+  // material.
   useLayoutEffect(() => {
     foliageGeo.setAttribute('aBurn', burnAttr)
     trunkGeo.setAttribute('aBurn', burnAttr)
-  }, [foliageGeo, trunkGeo, burnAttr])
+    foliageGeo.setAttribute('aSeed', seedAttr)
+    trunkGeo.setAttribute('aSeed', seedAttr)
+  }, [foliageGeo, trunkGeo, burnAttr, seedAttr])
 
   // Static transforms and base colours, written once per world.
   useLayoutEffect(() => {
@@ -427,12 +442,31 @@ function SpeciesGroup({
 }
 
 /**
- * A standard material patched to read a per-instance burn value.
+ * Trunks slump much less than foliage crowns at full char: the wood keeps
+ * its shape structurally while the burnt-out canopy above sags. This is a
+ * fixed ratio, not art direction that needs retuning per world, so it stays
+ * a local constant rather than a BURN token.
+ */
+const TRUNK_SETTLE_FACTOR = 0.15
+
+/**
+ * A standard material patched to read per-instance burn state and turn it
+ * into a tree that is never one flat colour.
  *
- * Foliage shrinks toward its base and drives to ember emissive as it burns,
- * then collapses to a charred stub; the trunk keeps its shape and just darkens.
- * Doing this in the shader keeps the whole grove at one draw call per part
- * rather than needing a material per burn stage.
+ * The old version applied a single scalar uniformly to every fragment: a
+ * whole tree flashed from orange to black together, because nothing in the
+ * shader knew *where* on the tree a fragment was. The fix rides on a fact
+ * that was already true and unused: geometry is built to unit height with
+ * its base at y = 0 (trees.ts), so the raw `position.y` attribute IS the
+ * 0..1 height fraction with no extra vertex data needed. Comparing that
+ * against `burnFront(vBurn)` (from burnShading.ts) turns the burn into a
+ * line climbing the tree: green canopy above it, a hot blackbody front at
+ * it, cooling char below it.
+ *
+ * Foliage shrinks toward its base and settles (slumps) as it chars; the
+ * trunk keeps its shape and settles far less. Doing this in the shader
+ * keeps the whole grove at one draw call per part rather than needing a
+ * material per burn stage.
  */
 function burnMaterialImpl(shrink: boolean) {
   const mat = new THREE.MeshStandardMaterial({
@@ -440,6 +474,8 @@ function burnMaterialImpl(shrink: boolean) {
     roughness: 0.85,
     metalness: 0,
   })
+
+  const f = (n: number) => n.toFixed(4)
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 }
@@ -450,16 +486,51 @@ function burnMaterialImpl(shrink: boolean) {
         '#include <common>',
         `#include <common>
          attribute float aBurn;
-         varying float vBurn;`,
+         attribute float aSeed;
+         varying float vBurn;
+         varying float vSeed;
+         varying float vHeight;
+         varying vec3 vObjPos;
+
+         // Rodrigues' rotation formula: rotate v about a unit axis through
+         // the origin. The tree base sits at the origin in object space
+         // (trees.ts normalises to y = 0), so rotating "transformed" about
+         // an axis through the origin pivots the whole tree from its base
+         // for free, with no separate translate-rotate-translate dance.
+         vec3 rotateAxisAngle(vec3 v, vec3 axis, float angle) {
+           float s = sin(angle);
+           float c = cos(angle);
+           return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+         }`,
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
          vBurn = aBurn;
+         vSeed = aSeed;
+         vHeight = position.y;
+         vObjPos = position;
+
+         // Foliage shrink starts early (0.15) so the crown is visibly
+         // thinning well before it fully chars; kept as it was, it read
+         // correctly and item 1/3 below did not touch it.
          ${shrink
-           ? `float shrinkF = mix(1.0, ${BURN.charredFoliageScale.toFixed(3)}, smoothstep(0.15, 1.0, aBurn));
+           ? `float shrinkF = mix(1.0, ${f(BURN.charredFoliageScale)}, smoothstep(0.15, 1.0, aBurn));
               transformed *= shrinkF;`
-           : ''}`,
+           : ''}
+
+         // Structural slump: starts once the front has reached the crown
+         // (flashEnd) rather than at first ignition, so the tree still
+         // reads as "on fire, upright" through the flash and only sags as
+         // it is actually consumed. Direction is per-tree (aSeed) so a
+         // whole grove does not slump toward the same side, which read as
+         // wind rather than as collapse when first tried with a fixed axis.
+         float settleAmt = smoothstep(${f(BURN.flashEnd)}, 1.0, aBurn);
+         float settleMag = ${f(BURN.settleRad)} * settleAmt * (0.4 + 0.6 * aSeed)
+           * ${shrink ? '1.0' : f(TRUNK_SETTLE_FACTOR)};
+         float settleDir = aSeed * 6.28318530718;
+         vec3 settleAxis = normalize(vec3(cos(settleDir), 0.0, sin(settleDir)));
+         transformed = rotateAxisAngle(transformed, settleAxis, settleMag);`,
       )
 
     shader.fragmentShader = shader.fragmentShader
@@ -467,33 +538,82 @@ function burnMaterialImpl(shrink: boolean) {
         '#include <common>',
         `#include <common>
          uniform float uTime;
-         varying float vBurn;`,
+         varying float vBurn;
+         varying float vSeed;
+         varying float vHeight;
+         varying vec3 vObjPos;
+         ${BURN_SHADING_GLSL}`,
       )
       .replace(
         '#include <dithering_fragment>',
         `#include <dithering_fragment>
-         vec3 ember = vec3(${hexToGlsl(BURN.ramp.orange)});
-         vec3 emberHot = vec3(${hexToGlsl(BURN.ramp.yellow)});
-         vec3 ash = vec3(${hexToGlsl(BURN.ramp.ash)});
+         // --- preheat: dry, dull, no flame yet (item 5) ---------------
+         // Desaturate toward a dry yellow-brown so ignition reads as having
+         // a cause (the tree visibly dries out) rather than jumping
+         // straight from green to fire. Faded back out once burnT (below)
+         // says this fragment is actually alight or already past.
+         float preheatT = smoothstep(0.0, ${f(BURN.preheatEnd)}, vBurn);
+         float gray = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
+         vec3 dry = vec3(gray) * vec3(1.15, 0.82, 0.5);
+         gl_FragColor.rgb = mix(gl_FragColor.rgb, dry, preheatT * 0.7);
 
-         float ignite = smoothstep(0.0, ${BURN.preheatEnd.toFixed(3)}, vBurn);
-         float dying = smoothstep(0.55, 1.0, vBurn);
-         float flicker = 1.0 + ${BURN.flickerDepth.toFixed(3)} *
-           sin(uTime * ${BURN.flickerHz.toFixed(3)} + vBurn * 41.0 + gl_FragCoord.x * 0.01);
+         // --- height-driven front (item 1) -----------------------------
+         // d > 0: above the front, still green. d < 0: at or below it.
+         // burnT sweeps 0 -> 1 across one frontBand of height, so the
+         // transition is a moving line with soft edges, not a hard clip.
+         float front = burnFront(vBurn);
+         float d = (vHeight - front) / ${f(BURN.frontBand)};
+         float burnT = 1.0 - smoothstep(0.0, 1.0, d);
+         preheatT *= (1.0 - burnT); // preheat tint only where still unburned
 
-         vec3 hot = mix(ember, emberHot, 0.35) * ${BURN.emissivePeak.toFixed(3)} * flicker;
-         vec3 burnt = mix(hot, ash, dying);
-         gl_FragColor.rgb = mix(gl_FragColor.rgb, burnt, ignite);`,
+         // --- blackbody ramp + phase curve (items 2 and 4) -------------
+         // "heat" peaks exactly at the front (|d| small) and is scaled by
+         // the shared four-act intensity curve, so a fragment right at the
+         // climbing line during the crown-flash act is the single hottest
+         // point on the tree, and the same fragment during smoulder (front
+         // long past, act intensity low) is dim even though d is unchanged.
+         float intensity = burnIntensity(vBurn);
+         float heat = clamp(1.0 - abs(d), 0.0, 1.0) * intensity;
+
+         // --- ember cracks in the char (item 3) -------------------------
+         // Object-space position is identical across instances (shared
+         // geometry), so it is offset by the per-tree seed before hashing;
+         // without that every burning tree in the grove would crack in the
+         // exact same places. Thresholded noise picks a minority of the
+         // char as veins; those pulse and only fade partway through the
+         // smoulder act rather than to zero, so the aftermath keeps
+         // visible embers instead of ever going solid black.
+         vec3 crackP = vObjPos * ${f(BURN.crackScale)} + vec3(vSeed * 133.7, vSeed * 71.3, uTime * 0.05);
+         float crackN = noise3(crackP);
+         float crack = step(${f(BURN.crackThreshold)}, crackN);
+         float pulse = 0.6 + 0.4 * sin(uTime * ${f(BURN.crackPulseHz * 6.28318530718)} + vSeed * 17.0);
+         float smoulderT = smoothstep(${f(BURN.sustainEnd)}, 1.0, vBurn);
+         float belowFront = clamp(-d, 0.0, 1.0);
+         float crackHeat = crack * pulse * mix(1.0, 0.5, smoulderT) * step(0.001, belowFront);
+
+         // --- multi-octave flicker, per-instance phase (item 6) --------
+         // Two sines at different rate and per-tree phase (vSeed), summed,
+         // instead of one sine keyed off gl_FragCoord.x: the old version
+         // flickered every tree in lock-step because screen position, not
+         // instance identity, was the only source of variation.
+         float flicker = 1.0
+           + ${f(BURN.flickerDepth * 0.6)} * sin(uTime * ${f(BURN.flickerHz)} + vSeed * 41.0)
+           + ${f(BURN.flickerDepth * 0.4)} * sin(uTime * ${f(BURN.flickerHz * 2.3)} + vSeed * 7.0 + vHeight * 3.0);
+
+         vec3 hot = blackbody(clamp(heat + crackHeat, 0.0, 1.0)) * ${f(BURN.emissivePeak)} * flicker;
+         gl_FragColor.rgb = mix(gl_FragColor.rgb, hot, clamp(burnT + crackHeat, 0.0, 1.0));`,
       )
   }
 
-  return mat
-}
+  // Foliage (shrink: true) and trunk (shrink: false) look identical to
+  // three's program cache (same material parameters; the difference is
+  // baked into shader SOURCE via the ternaries above, which the cache never
+  // hashes). Without a distinct key here they silently share one compiled
+  // program and one of the two loses its shrink/settle behaviour. See the
+  // matching note at diorama.ts:322 for the same failure mode elsewhere.
+  mat.customProgramCacheKey = () => `burn-${shrink ? 'foliage' : 'trunk'}`
 
-/** #rrggbb -> "r.rrr, g.ggg, b.bbb" for inlining into GLSL. */
-function hexToGlsl(hex: string): string {
-  const c = new THREE.Color(hex)
-  return `${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)}`
+  return mat
 }
 
 /** Thin React wrapper so the patched material can be declared as JSX. */
