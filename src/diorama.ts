@@ -39,7 +39,7 @@ export function buildDiorama(terrain: TerrainField): DioramaGeometry {
   const bottomY = minH - SLAB_DEPTH
 
   return {
-    surface: buildSurface(terrain, minH, maxH),
+    surface: buildSurface(terrain, maxH),
     sides: buildSides(terrain, minH, bottomY),
     bottomY,
   }
@@ -58,7 +58,7 @@ function nodeAt(terrain: TerrainField, ix: number, iz: number): THREE.Vector3 {
   )
 }
 
-/** Flat elevation band lookup, by height normalised across the whole map. */
+/** Flat elevation band lookup, by height normalised over the land above the waterline. */
 function bandColor(normalised: number): THREE.Color {
   for (const band of ELEVATION_BANDS) {
     if (normalised <= band.upTo) return new THREE.Color(band.color)
@@ -72,9 +72,14 @@ function bandColor(normalised: number): THREE.Color {
  * so terraced cliff walls read as exposed rock against the green plateaus
  * above and below them.
  */
-function buildSurface(terrain: TerrainField, minH: number, maxH: number): THREE.BufferGeometry {
-  const { resolution } = terrain
-  const span = Math.max(maxH - minH, 1e-6)
+function buildSurface(terrain: TerrainField, maxH: number): THREE.BufferGeometry {
+  const { resolution, waterLevel } = terrain
+  // Bands are anchored to the waterline, not to the map's lowest point: the beach
+  // belongs just above the water wherever the water happens to sit, and a seabed
+  // deep enough to move that percentile would otherwise submerge the sand band
+  // entirely and run meadow green straight into the sea. Submerged ground goes
+  // negative here and falls into the first (sand) band, which is what a seabed is.
+  const span = Math.max(maxH - waterLevel, 1e-6)
   const positions: number[] = []
   const colors: number[] = []
 
@@ -92,7 +97,7 @@ function buildSurface(terrain: TerrainField, minH: number, maxH: number): THREE.
     const color =
       steepness >= CLIFF_SLOPE
         ? new THREE.Color(CLIFF_COLOR)
-        : bandColor((cy - minH) / span)
+        : bandColor((cy - waterLevel) / span)
 
     for (const v of [a, b, c]) positions.push(v.x, v.y, v.z)
     for (let i = 0; i < 3; i++) colors.push(color.r, color.g, color.b)
