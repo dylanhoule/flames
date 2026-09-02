@@ -40,17 +40,17 @@ export const LIGHTS = {
  * blended satellite texture.
  */
 export const ELEVATION_BANDS = [
-  { upTo: 0.06, color: '#d8cba4' }, // shoreline sand
-  { upTo: 0.34, color: '#6fa84b' }, // meadow
-  { upTo: 0.58, color: '#3f7a37' }, // treeline forest floor
-  { upTo: 0.78, color: '#7d8189' }, // exposed rock
+  { upTo: 0.05, color: '#d8cba4' }, // shoreline sand
+  { upTo: 0.40, color: '#6fa84b' }, // meadow
+  { upTo: 0.70, color: '#3f7a37' }, // treeline forest floor
+  { upTo: 0.88, color: '#7d8189' }, // exposed rock
   { upTo: 1.0, color: '#eef2f5' }, // snow
 ] as const
 
 /** Steep terraced faces read as rock whatever band they fall in. */
 export const CLIFF_COLOR = '#6b7079'
 /** Slope magnitude at or above which a face is drawn as cliff rock. */
-export const CLIFF_SLOPE = 0.85
+export const CLIFF_SLOPE = 1.3
 
 /** The cut side of the slab, top course first. */
 export const STRATA = [
@@ -72,9 +72,9 @@ export const SCORCH = {
 // ------------------------------------------------------------------ water
 
 export const WATER = {
-  color: '#2f9fb8',
+  color: '#2b8299',
   deepColor: '#186a86',
-  opacity: 0.82,
+  opacity: 0.78,
   /** UV scroll speed for the surface, world units per second. */
   flow: 0.05,
   foam: '#eaf6f8',
@@ -89,7 +89,7 @@ export const FOLIAGE = {
   hardwoodA: '#5d9c3c',
   hardwoodB: '#78ad42',
   /** Snow tint blended onto upper tiers above this elevation fraction. */
-  snowAbove: 0.62,
+  snowAbove: 0.82,
   snow: '#e8f0f4',
 } as const
 
