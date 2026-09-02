@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
@@ -21,19 +21,22 @@ export interface SceneProps {
   forest: Forest
   sim: FireSim | null
   seed: number
+  onIgnite?: (cellId: number) => void
+  /** Mutated in place with total SIMULATED seconds advanced. */
+  clock?: { elapsed: number }
 }
 
 /**
  * The diorama. Reads simulation state every frame and pushes it into instanced
  * attributes; it never mutates the sim except through the ignite click.
  */
-export function Scene({ terrain, forest, sim, seed }: SceneProps) {
+export function Scene({ terrain, forest, sim, seed, onIgnite, clock }: SceneProps) {
   return (
     <Canvas
       orthographic
       shadows
-      camera={{ position: CAMERA.position as unknown as [number, number, number], zoom: CAMERA.zoom, near: -500, far: 1000 }}
-      gl={{ antialias: true }}
+      camera={{ position: CAMERA.position as unknown as [number, number, number], zoom: CAMERA.zoom, near: 0.1, far: 1000 }}
+      gl={{ antialias: false }}
       onCreated={({ gl, scene }) => {
         gl.toneMapping = THREE.ACESFilmicToneMapping
         gl.toneMappingExposure = 1.05
@@ -41,9 +44,10 @@ export function Scene({ terrain, forest, sim, seed }: SceneProps) {
       }}
     >
       <Lighting />
+      <SimDriver sim={sim} clock={clock} />
       <Slab terrain={terrain} />
       <Water terrain={terrain} />
-      <Trees terrain={terrain} forest={forest} sim={sim} seed={seed} />
+      <Trees terrain={terrain} forest={forest} sim={sim} seed={seed} onIgnite={onIgnite} />
       <OrbitControls
         enablePan={false}
         enableDamping
@@ -52,17 +56,50 @@ export function Scene({ terrain, forest, sim, seed }: SceneProps) {
         minZoom={CAMERA.minZoom}
         maxZoom={CAMERA.maxZoom}
       />
-      <EffectComposer>
-        <Bloom
-          intensity={POST.bloomIntensity}
-          luminanceThreshold={POST.bloomThreshold}
-          radius={POST.bloomRadius}
-          mipmapBlur
-        />
-        <Vignette darkness={POST.vignette} eskil={false} />
-      </EffectComposer>
+      <DeferredEffects />
     </Canvas>
   )
+}
+
+/**
+ * Post-processing, mounted one frame late.
+ *
+ * Mounting EffectComposer in the same commit as the Canvas leaves it
+ * initialised against a canvas that has not been measured yet, and it renders
+ * black forever rather than recovering on the next resize. Waiting for one
+ * frame costs nothing visible and makes a cold load behave like a hot reload.
+ */
+function DeferredEffects() {
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setReady(true))
+    return () => cancelAnimationFrame(id)
+  }, [])
+  if (!ready) return null
+  return (
+    <EffectComposer multisampling={4}>
+      <Bloom
+        intensity={POST.bloomIntensity}
+        luminanceThreshold={POST.bloomThreshold}
+        radius={POST.bloomRadius}
+        mipmapBlur
+      />
+      <Vignette darkness={POST.vignette} eskil={false} />
+    </EffectComposer>
+  )
+}
+
+/** Advances the simulation once per frame. The Scene never mutates sim state
+ *  anywhere else except through the ignite click. */
+function SimDriver({ sim, clock }: { sim: FireSim | null; clock?: { elapsed: number } }) {
+  useFrame((_, delta) => {
+    if (!sim) return
+    // Clamp so a backgrounded tab does not resume with one enormous step.
+    const dt = Math.min(delta, 0.1)
+    sim.tick(dt)
+    if (clock) clock.elapsed += dt
+  })
+  return null
 }
 
 function Lighting() {
@@ -81,7 +118,8 @@ function Lighting() {
         shadow-camera-bottom={-80}
         shadow-camera-near={1}
         shadow-camera-far={300}
-        shadow-bias={-0.0006}
+        shadow-bias={-0.0004}
+        shadow-normalBias={0.8}
       />
       <directionalLight
         color={LIGHTS.fill.color}
@@ -140,7 +178,7 @@ function Trees(props: SceneProps & { terrain: TerrainField }) {
 }
 
 function SpeciesGroup({
-  terrain, forest, sim, seed, species,
+  terrain, forest, sim, seed, species, onIgnite,
 }: SceneProps & { species: Species }) {
   const foliageRef = useRef<THREE.InstancedMesh>(null)
   const trunkRef = useRef<THREE.InstancedMesh>(null)
@@ -256,6 +294,13 @@ function SpeciesGroup({
         castShadow
         receiveShadow
         frustumCulled={false}
+        onClick={(e) => {
+          if (e.instanceId === undefined) return
+          const tree = trees[e.instanceId]
+          if (!tree) return
+          e.stopPropagation()
+          onIgnite?.(tree.cell.id)
+        }}
       >
         <BurnMaterial shrink />
       </instancedMesh>

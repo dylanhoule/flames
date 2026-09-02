@@ -114,7 +114,7 @@ export const BURN = {
   emberHot: '#ffd28a',
   ash: '#1b1613',
   /** Emissive multiplier at peak burn, pre-tone-mapping. */
-  emissivePeak: 4.5,
+  emissivePeak: 2.4,
   /** Flicker depth and rate for the per-instance emissive noise. */
   flickerDepth: 0.35,
   flickerHz: 7.0,
