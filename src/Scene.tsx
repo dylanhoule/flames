@@ -472,11 +472,11 @@ function burnMaterialImpl(shrink: boolean) {
       .replace(
         '#include <dithering_fragment>',
         `#include <dithering_fragment>
-         vec3 ember = vec3(${hexToGlsl(BURN.ember)});
-         vec3 emberHot = vec3(${hexToGlsl(BURN.emberHot)});
-         vec3 ash = vec3(${hexToGlsl(BURN.ash)});
+         vec3 ember = vec3(${hexToGlsl(BURN.ramp.orange)});
+         vec3 emberHot = vec3(${hexToGlsl(BURN.ramp.yellow)});
+         vec3 ash = vec3(${hexToGlsl(BURN.ramp.ash)});
 
-         float ignite = smoothstep(0.0, ${BURN.ignitionRamp.toFixed(3)}, vBurn);
+         float ignite = smoothstep(0.0, ${BURN.preheatEnd.toFixed(3)}, vBurn);
          float dying = smoothstep(0.55, 1.0, vBurn);
          float flicker = 1.0 + ${BURN.flickerDepth.toFixed(3)} *
            sin(uTime * ${BURN.flickerHz.toFixed(3)} + vBurn * 41.0 + gl_FragCoord.x * 0.01);

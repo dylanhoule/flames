@@ -226,8 +226,8 @@ function Flames({ forest, sim }: { forest: Forest; sim: FireSim | null }) {
       blending: THREE.AdditiveBlending,
       uniforms: {
         uTime: { value: 0 },
-        uEmber: { value: new THREE.Color(BURN.ember) },
-        uHot: { value: new THREE.Color(BURN.emberHot) },
+        uEmber: { value: new THREE.Color(BURN.ramp.orange) },
+        uHot: { value: new THREE.Color(BURN.ramp.yellow) },
       },
       // Flames grow in over the ignition ramp and shrink away as the cell chars.
       vertexShader: vertexShader('(smoothstep(0.0, 0.18, aAge) * (1.0 - smoothstep(0.5, 1.0, aAge)))'),
