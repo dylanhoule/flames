@@ -10,7 +10,8 @@ import { BURNING, CHARRED } from './types'
 import type { Wind } from './types'
 
 export function App() {
-  const [seed, setSeed] = useState(1)
+  // Lazy initial state, so a page refresh is a fresh world rather than seed 1.
+  const [seed, setSeed] = useState(() => (Math.random() * 0x7fffffff) >>> 0)
   const [wind, setWind] = useState<Wind>({ speed: 3, directionRad: 0 })
   const [tally, setTally] = useState({ burning: 0, charred: 0, elapsed: 0 })
   const clock = useRef({ elapsed: 0 })
