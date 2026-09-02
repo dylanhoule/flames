@@ -171,6 +171,13 @@ export const TRUNK = {
   charred: '#17130f',
 } as const
 
+/**
+ * Nominal tree height in world units, before per-tree jitter. Tree geometry is
+ * authored to a normalised height of 1.0, so this is the scale that turns it
+ * into a tree, and the number every fire anchor is a fraction of.
+ */
+export const BASE_TREE_HEIGHT = 7
+
 /** Per-instance variation, as multipliers or radians. */
 export const TREE_JITTER = {
   height: 0.25,
@@ -284,19 +291,30 @@ export const FLAME = {
   tonguesPerCell: 3,
   /** World units of sideways lean at the flame tip, per m/s of wind. */
   windLean: 0.38,
-  /** Base height in world units at full intensity, before per-tongue jitter. */
-  height: 4.2,
-  /** Spread of tongue anchors around the cell centre, world units. */
-  spread: 1.1,
   /**
-   * How far above the cell's ground position the flames are anchored.
-   * Trees stand about 7 units with a canopy filling roughly 2 to 7, so the
-   * old 2.6 buried every flame INSIDE its own crown, where the depth test
-   * discarded it: only trees with unusually small canopies showed a flame at
-   * all. Anchoring near the top of the crown puts the tongues where a crown
-   * fire actually burns and lets them lick clear of the foliage.
+   * Everything below is a fraction of the TREE'S OWN height, not a world unit.
+   *
+   * These were absolute (lift 5.4, height 4.2, spread 1.1) and that is what
+   * made the flames hover. Two reasons. The lift was tuned against a tree that
+   * did not exist: the canopy was never seated on the trunk, so trees stood a
+   * quarter short and the flame base sat above the crown it was meant to be
+   * inside. And a single world-unit lift cannot fit a grove whose heights are
+   * jittered by a quarter either way: it floats over the short trees and is
+   * swallowed by the tall ones. Fractions fit every tree by construction.
    */
-  lift: 5.4,
+
+  /** Flame base, as a fraction of tree height. Lands ~58% up the crown. */
+  liftFraction: 0.72,
+  /**
+   * Quad height as a fraction of tree height, before per-tongue jitter.
+   * Chosen so that at the sustained burn intensity (0.45) the tip sits right
+   * at the crown top and only the crown flash punches clear of the foliage.
+   * Note the billboard scales width and height together, so this is also the
+   * only control over flame width: trim it if the tongues read fat.
+   */
+  heightFraction: 0.6,
+  /** Spread of tongue anchors around the trunk, as a fraction of tree height. */
+  spreadFraction: 0.16,
 } as const
 
 /**
@@ -332,6 +350,13 @@ export const SMOKE = {
   rise: 2.4,
   /** Seconds a column keeps emitting after its cell chars. */
   lingerAfterChar: 6,
+  /**
+   * Where the column starts, as a fraction of the tree's height: the crown
+   * top, where the smoke of a burning canopy actually leaves it. Was a
+   * hardcoded `+ 4` world units carrying the same wrong idea of how tall a
+   * tree is that put the flames in the air.
+   */
+  liftFraction: 1.0,
 } as const
 
 // -------------------------------------------------------------------- post

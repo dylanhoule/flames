@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { Box3 } from 'three'
 import { mulberry32 } from './rng'
-import { buildFoliage, buildTrunk, trunkHeightFraction } from './trees'
+import { buildFoliage, buildTrunk, trunkHeightFraction, treeVariation } from './trees'
+import { FLAME } from './visual'
 import type { Species } from './types'
 
 const SPECIES: Species[] = ['conifer', 'hardwood']
@@ -12,14 +13,28 @@ function bounds(geo: { computeBoundingBox(): void; boundingBox: Box3 | null }) {
 }
 
 describe('tree geometry', () => {
-  it.each(SPECIES)('%s foliage sits above the trunk and inside unit height', (species) => {
-    const geo = buildFoliage(species, mulberry32(4))
-    const b = bounds(geo)
-    // Canopy is authored in the same unit space as the trunk, starting at or
-    // above the trunk top, and never poking out past the normalised height.
-    expect(b.min.y).toBeGreaterThanOrEqual(-0.01)
-    expect(b.max.y).toBeLessThanOrEqual(1.05)
-    expect(b.max.y).toBeGreaterThan(trunkHeightFraction(species) * 0.5)
+  // Several seeds, because tier and blob counts vary with the seed and the
+  // extremes are what these bounds are guarding.
+  it.each(SPECIES)('%s foliage is seated on the trunk and reaches the tree top', (species) => {
+    for (const seed of [1, 4, 7, 11, 23, 42]) {
+      const b = bounds(buildFoliage(species, mulberry32(seed)))
+      const trunk = trunkHeightFraction(species)
+      // Seated at the trunk top, not sitting on the ground. Dropping this
+      // translate is what made trees a quarter short and left the flames,
+      // which anchor as a fraction of tree height, hanging above the crown.
+      // The bound is loose because a hardwood's lowest blob is randomly
+      // offset and legitimately dips a little below the canopy base.
+      expect(b.min.y).toBeGreaterThan(trunk * 0.8)
+      // Crown reaches the top of the normalised tree. The conifer's topmost
+      // tier is allowed to spire slightly past it: tiers deliberately overlap.
+      expect(b.max.y).toBeGreaterThan(0.85)
+      expect(b.max.y).toBeLessThanOrEqual(1.12)
+    }
+  })
+
+  it.each(SPECIES)('%s crown overlaps the trunk rather than floating above it', (species) => {
+    const foliage = bounds(buildFoliage(species, mulberry32(4)))
+    expect(foliage.min.y).toBeLessThan(bounds(buildTrunk(species)).max.y)
   })
 
   it.each(SPECIES)('%s trunk starts at the ground', (species) => {
@@ -52,5 +67,36 @@ describe('tree geometry', () => {
       (s) => buildFoliage('conifer', mulberry32(s)).getAttribute('position').count,
     )
     expect(new Set(seeds).size).toBeGreaterThan(1)
+  })
+})
+
+/**
+ * The flames used to hang in the air above the trees, and the reason was that
+ * their anchor was an absolute world height while a tree's height is jittered
+ * by a quarter either way. Both are fractions of the tree's own height now, so
+ * the relationship can be checked once in unit space and holds for every tree.
+ */
+describe('flame anchoring', () => {
+  it.each(SPECIES)('%s flames are anchored inside the crown and clear its top', (species) => {
+    for (const seed of [1, 4, 7, 11, 23, 42]) {
+      const crown = bounds(buildFoliage(species, mulberry32(seed)))
+      // Anchored in the crown, not below it and not floating above it.
+      expect(FLAME.liftFraction).toBeGreaterThan(crown.min.y)
+      expect(FLAME.liftFraction).toBeLessThan(crown.max.y)
+      // Even the shortest tongue (0.75 jitter) at full intensity reaches past
+      // the foliage, so no tree burns with its flames buried in its own crown.
+      expect(FLAME.liftFraction + FLAME.heightFraction * 0.75).toBeGreaterThan(crown.max.y)
+    }
+  })
+
+  it('tree variation is deterministic per cell and independent of call order', () => {
+    const a = treeVariation(7, 99)
+    const b = treeVariation(7, 99)
+    expect(a).toEqual(b)
+    // Reading a different tree in between must not shift the answer: the Scene
+    // and the fire effects walk the forest in different orders.
+    treeVariation(3, 99)
+    expect(treeVariation(7, 99)).toEqual(a)
+    expect(treeVariation(8, 99).height).not.toBe(a.height)
   })
 })

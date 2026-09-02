@@ -4,7 +4,9 @@ import * as THREE from 'three'
 import type { FireSim, Forest, Wind } from './types'
 import { BURNING, CHARRED } from './types'
 import { FLAME, EMBERS, SMOKE } from './visual'
+import { treeVariation } from './trees'
 import { NOISE_GLSL, BURN_PHASE_GLSL, BURN_SHADING_GLSL, burnIntensity } from './burnShading'
+import { simClock } from './simClock'
 
 /**
  * Fire effects: smoke columns, flame billboards and ember sparks.
@@ -58,14 +60,19 @@ export interface FxProps {
   forest: Forest
   sim: FireSim | null
   wind: Wind
+  /**
+   * World seed. Every anchor here is a fraction of the burning tree's own
+   * height, and `treeVariation` needs the seed to say how tall that tree is.
+   */
+  seed: number
 }
 
-export function FireEffects({ forest, sim, wind }: FxProps) {
+export function FireEffects({ forest, sim, wind, seed }: FxProps) {
   return (
     <>
-      <Smoke forest={forest} sim={sim} wind={wind} />
-      <Flames forest={forest} sim={sim} wind={wind} />
-      <Embers forest={forest} sim={sim} wind={wind} />
+      <Smoke forest={forest} sim={sim} wind={wind} seed={seed} />
+      <Flames forest={forest} sim={sim} wind={wind} seed={seed} />
+      <Embers forest={forest} sim={sim} wind={wind} seed={seed} />
     </>
   )
 }
@@ -143,7 +150,7 @@ function vertexShader(scaleCurve: string) {
   return BILLBOARD_VERT.replace('SCALE_CURVE', scaleCurve)
 }
 
-function Smoke({ forest, sim, wind }: FxProps) {
+function Smoke({ forest, sim, wind, seed }: FxProps) {
   const count = forest.cells.length * PUFFS_PER_CELL
   const ref = useRef<THREE.Mesh>(null)
 
@@ -227,10 +234,17 @@ function Smoke({ forest, sim, wind }: FxProps) {
   // Per-cell emission clock, so puffs stagger instead of pulsing in unison.
   const clocks = useMemo(() => new Float32Array(forest.cells.length), [forest])
   const linger = useMemo(() => new Float32Array(forest.cells.length), [forest])
+  // World y each column starts from: the top of that cell's own tree. Resolved
+  // once here rather than in the frame loop, which touches every puff.
+  const baseY = useMemo(
+    () => Float32Array.from(forest.cells, (cell) =>
+      cell.position[1] + treeVariation(cell.id, seed).height * SMOKE.liftFraction),
+    [forest, seed],
+  )
 
   useFrame((_, rawDelta) => {
     if (!sim || !ref.current) return
-    const delta = Math.min(rawDelta, 0.1)
+    const delta = Math.min(rawDelta, 0.1) * simClock.scale
     const windX = Math.cos(wind.directionRad) * wind.speed * SMOKE_DRIFT
     const windZ = Math.sin(wind.directionRad) * wind.speed * SMOKE_DRIFT
     ;(material.uniforms.uWindLean!.value as THREE.Vector2).set(0, 0)
@@ -256,7 +270,7 @@ function Smoke({ forest, sim, wind }: FxProps) {
         ageArr[i] = phase
         const t = phase * PUFF_LIFETIME
         offArr[i * 3] = cell.position[0] + windX * t
-        offArr[i * 3 + 1] = cell.position[1] + 4 + SMOKE.rise * t
+        offArr[i * 3 + 1] = baseY[c]! + SMOKE.rise * t
         offArr[i * 3 + 2] = cell.position[2] + windZ * t
       }
     }
@@ -267,7 +281,7 @@ function Smoke({ forest, sim, wind }: FxProps) {
   return <mesh ref={ref} geometry={geometry} material={material} frustumCulled={false} renderOrder={2} />
 }
 
-function Flames({ forest, sim, wind }: FxProps) {
+function Flames({ forest, sim, wind, seed }: FxProps) {
   const tongues = FLAME.tonguesPerCell
   const count = forest.cells.length * tongues
   const ref = useRef<THREE.Mesh>(null)
@@ -284,17 +298,26 @@ function Flames({ forest, sim, wind }: FxProps) {
     // per-frame upload to one float per instance same as the smoke's.
     for (let c = 0; c < forest.cells.length; c++) {
       const cell = forest.cells[c]!
+      // Anchor, spread and length are all fractions of THIS tree's height, so
+      // a short tree and a tall one both get flames that sit in their crown.
+      // A flat world-unit lift is what left them hanging in the air.
+      const h = treeVariation(cell.id, seed).height
       for (let t = 0; t < tongues; t++) {
         const i = c * tongues + t
         const seedA = frac(i * 0.7548776662)
         const seedB = frac(i * 0.5698402910 + 0.5)
         const seedC = frac(i * 0.3618033989 + 0.25)
-        const jitterX = (seedA - 0.5) * 2 * FLAME.spread
-        const jitterZ = (seedB - 0.5) * 2 * FLAME.spread
-        offset.setXYZ(i, cell.position[0] + jitterX, cell.position[1] + FLAME.lift, cell.position[2] + jitterZ)
+        const jitterX = (seedA - 0.5) * 2 * FLAME.spreadFraction * h
+        const jitterZ = (seedB - 0.5) * 2 * FLAME.spreadFraction * h
+        offset.setXYZ(
+          i,
+          cell.position[0] + jitterX,
+          cell.position[1] + h * FLAME.liftFraction,
+          cell.position[2] + jitterZ,
+        )
         // data.x doubles as both the noise phase (so tongues don't flicker in
         // lockstep) and the per-tongue height jitter seed.
-        data.setXY(i, seedA, FLAME.height * (0.75 + seedC * 0.5))
+        data.setXY(i, seedA, h * FLAME.heightFraction * (0.75 + seedC * 0.5))
       }
     }
     geometry.setAttribute('aOffset', offset)
@@ -356,13 +379,13 @@ function Flames({ forest, sim, wind }: FxProps) {
     // `offset` is deliberately not returned: flame anchors are static, so
     // unlike the smoke there is nothing to write back to it per frame.
     return { geometry, material, age }
-  }, [count, tongues])
+  }, [count, tongues, forest, seed])
 
   useEffect(() => () => { geometry.dispose(); material.dispose() }, [geometry, material])
 
-  useFrame((state) => {
+  useFrame(() => {
     if (!sim || !ref.current) return
-    material.uniforms.uTime!.value = state.clock.elapsedTime
+    material.uniforms.uTime!.value = simClock.time
     // Wind lean: tip displacement in world units per m/s, applied in the
     // shader as a view-space shear that grows with uv.y^2 (see BILLBOARD_VERT).
     // This is the fix that makes the wind slider legible in the fire itself,
@@ -400,7 +423,7 @@ function Flames({ forest, sim, wind }: FxProps) {
  * the same "no integration" approach the smoke uses: it is what lets a wind
  * change instantly bend every live spark instead of only the new ones.
  */
-function Embers({ forest, sim, wind }: FxProps) {
+function Embers({ forest, sim, wind, seed }: FxProps) {
   const maxCount = EMBERS.maxCount
   const ref = useRef<THREE.Mesh>(null)
 
@@ -455,6 +478,13 @@ function Embers({ forest, sim, wind }: FxProps) {
   // Per-cell spawn accumulator: fractional sparks owed to a cell, carried
   // frame to frame so the spawn rate is correct however delta lands.
   const spawnAccum = useMemo(() => new Float32Array(forest.cells.length), [forest])
+  // Sparks lift off where the flames are, so this shares the flames' fraction
+  // rather than carrying a knob of its own.
+  const baseY = useMemo(
+    () => Float32Array.from(forest.cells, (cell) =>
+      cell.position[1] + treeVariation(cell.id, seed).height * FLAME.liftFraction),
+    [forest, seed],
+  )
 
   // Ring buffer state, in plain arrays rather than React state: this is
   // mutated every frame from useFrame and must never trigger a re-render.
@@ -473,7 +503,7 @@ function Embers({ forest, sim, wind }: FxProps) {
 
   useFrame((_, rawDelta) => {
     if (!sim || !ref.current) return
-    const delta = Math.min(rawDelta, 0.1)
+    const delta = Math.min(rawDelta, 0.1) * simClock.scale
     const windX = Math.cos(wind.directionRad) * wind.speed * EMBERS.drift
     const windZ = Math.sin(wind.directionRad) * wind.speed * EMBERS.drift
 
@@ -492,7 +522,7 @@ function Embers({ forest, sim, wind }: FxProps) {
         particles.seed[slot] = frac(particles.spawnCounter * 0.6180339887)
         particles.spawnCounter++
         particles.spawnX[slot] = cell.position[0]
-        particles.spawnY[slot] = cell.position[1] + FLAME.lift * 0.5
+        particles.spawnY[slot] = baseY[c]!
         particles.spawnZ[slot] = cell.position[2]
       }
     }

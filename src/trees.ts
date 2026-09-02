@@ -1,14 +1,17 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import type { Rng, Species } from './types'
-import { range } from './rng'
+import { mulberry32, range } from './rng'
+import { BASE_TREE_HEIGHT, TREE_JITTER } from './visual'
 
 /**
  * Faceted low-poly tree geometry for the diorama.
  *
- * Every geometry here is built to a NORMALISED unit height of 1.0 with its
- * base at y = 0, so a single per-instance scale turns it into a tree of any
- * size. Foliage and trunk are separate geometries, and therefore separate
+ * Every geometry here is built to a NORMALISED unit height of 1.0 with the
+ * TREE's base at y = 0, so a single per-instance scale turns it into a tree of
+ * any size. The trunk starts at 0; the canopy is authored from 0 and seated on
+ * the trunk by `buildFoliage`, so it lands at TRUNK_FRACTION and the tree tops
+ * out at 1. Foliage and trunk are separate geometries, and therefore separate
  * instanced meshes, for one reason: as a tree burns its foliage shrinks away
  * while the trunk remains as a charred spire. Splitting them lets the Scene
  * animate foliage scale independently without touching the trunk.
@@ -33,13 +36,53 @@ export function trunkHeightFraction(species: Species): number {
   return TRUNK_FRACTION[species]
 }
 
+/** Per-tree fixed variation. See `treeVariation`. */
+export interface TreeVariation {
+  /** World units, base to normalised top. */
+  height: number
+  /** Multiplier on canopy width, 1 being the authored width. */
+  radius: number
+  tiltX: number
+  tiltZ: number
+  spin: number
+  /** 0..1, mixes the species' two foliage greens. */
+  hue: number
+}
+
+/**
+ * Per-tree fixed variation, seeded from the cell id rather than drawn from one
+ * sequential stream.
+ *
+ * The renderer and the fire effects both need a tree's height (the Scene to
+ * scale it, fx to anchor flames in its crown) and they walk different subsets
+ * of the forest in different orders. Keying on the id means either can ask for
+ * one tree in isolation and get the same answer, with no shared stream to keep
+ * in step and nothing to thread through props.
+ */
+export function treeVariation(cellId: number, seed: number): TreeVariation {
+  const rng = mulberry32((seed ^ Math.imul(cellId + 1, 0x9e3779b1)) >>> 0)
+  return {
+    height: BASE_TREE_HEIGHT * (1 + range(rng, -TREE_JITTER.height, TREE_JITTER.height)),
+    radius: 1 + range(rng, -TREE_JITTER.radius, TREE_JITTER.radius),
+    tiltX: range(rng, -TREE_JITTER.tiltRad, TREE_JITTER.tiltRad),
+    tiltZ: range(rng, -TREE_JITTER.tiltRad, TREE_JITTER.tiltRad),
+    spin: range(rng, 0, Math.PI * 2),
+    hue: rng(),
+  }
+}
+
 /**
  * Tapered trunk, base at y = 0, top at y = 1.
  * Instanced with a scale of (1, treeHeight, 1) so it always reaches the canopy.
  */
 export function buildTrunk(species: Species): THREE.BufferGeometry {
   const r = TRUNK_RADIUS[species]
-  const h = TRUNK_FRACTION[species] + 0.06 // overlap slightly into the canopy
+  // Overlap up into the canopy so no seam shows where the crown is seated.
+  // 0.10, not the old 0.06: a hardwood's lowest blob is randomly offset and on
+  // some seeds starts 0.083 above the canopy base, which left the crown
+  // hovering a hair off the trunk. Invisible either way, being inside the
+  // foliage, so size it for the worst seed rather than the average one.
+  const h = TRUNK_FRACTION[species] + 0.10
   const geo = new THREE.CylinderGeometry(r * 0.62, r, h, 6, 1)
   geo.translate(0, h / 2, 0)
   return geo
@@ -51,8 +94,9 @@ export function buildTrunk(species: Species): THREE.BufferGeometry {
  * pyramid. Merged into ONE geometry so the whole canopy is a single instanced
  * draw call.
  *
- * Built with its base at y = 0 so the Scene can seat it at the trunk top and
- * shrink it downward as it burns.
+ * Authored with its base at y = 0 against a canopy budget of 1 - TRUNK_FRACTION.
+ * `buildFoliage` seats it on the trunk; do not call this directly expecting a
+ * placed canopy.
  */
 export function buildConiferFoliage(rng: Rng): THREE.BufferGeometry {
   const tiers = 4 + Math.floor(rng() * 3) // 4, 5 or 6
@@ -106,7 +150,20 @@ export function buildHardwoodFoliage(rng: Rng): THREE.BufferGeometry {
 }
 
 export function buildFoliage(species: Species, rng: Rng): THREE.BufferGeometry {
-  return species === 'conifer' ? buildConiferFoliage(rng) : buildHardwoodFoliage(rng)
+  const geo = species === 'conifer' ? buildConiferFoliage(rng) : buildHardwoodFoliage(rng)
+  // Seat the crown on the trunk. Both builders author their canopy base at
+  // y = 0 against a canopy budget of `1 - TRUNK_FRACTION`, so without this the
+  // crown sits on the ground, swallows the trunk, and the tree tops out a
+  // quarter short of its normalised height. That shortfall is what put the
+  // flame anchors above the trees.
+  //
+  // Done in the GEOMETRY rather than in the Scene's instance matrix: the
+  // per-tree tilt quaternion and the burn shader's settle rotation both pivot
+  // about the object origin (the tree base), so a world-space Y offset applied
+  // after them would swing the crown about its own base instead of the trunk's.
+  geo.translate(0, TRUNK_FRACTION[species], 0)
+  geo.computeBoundingSphere()
+  return geo
 }
 
 /**

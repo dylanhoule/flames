@@ -6,19 +6,17 @@ import * as THREE from 'three'
 
 import { applyScorch, buildDiorama, ScorchMap } from './diorama'
 import { FireEffects } from './fx'
-import { buildFoliage, buildTrunk } from './trees'
+import { buildFoliage, buildTrunk, treeVariation, trunkHeightFraction } from './trees'
 import { generateScatter } from './scatter'
 import type { ScatterProp } from './scatter'
-import { mulberry32, range } from './rng'
+import { mulberry32 } from './rng'
 import type { FireSim, Forest, Species, TerrainField, Wind } from './types'
 import { BURNING, CHARRED } from './types'
 import {
-  BACKDROP, BURN, CAMERA, CLIFF_COLOR, FIRE_LIGHT, FOLIAGE, LIGHTS, POST, TREE_JITTER, TRUNK, WATER,
+  BACKDROP, BURN, CAMERA, CLIFF_COLOR, FIRE_LIGHT, FOLIAGE, LIGHTS, POST, TRUNK, WATER,
 } from './visual'
 import { BURN_SHADING_GLSL, burnIntensity, glslColor } from './burnShading'
-
-/** Height of a tree in world units, before per-instance jitter. */
-const BASE_TREE_HEIGHT = 7
+import { simClock } from './simClock'
 
 export interface SceneProps {
   terrain: TerrainField
@@ -27,15 +25,13 @@ export interface SceneProps {
   wind: Wind
   seed: number
   onIgnite?: (cellId: number) => void
-  /** Mutated in place with total SIMULATED seconds advanced. */
-  clock?: { elapsed: number }
 }
 
 /**
  * The diorama. Reads simulation state every frame and pushes it into instanced
  * attributes; it never mutates the sim except through the ignite click.
  */
-export function Scene({ terrain, forest, sim, wind, seed, onIgnite, clock }: SceneProps) {
+export function Scene({ terrain, forest, sim, wind, seed, onIgnite }: SceneProps) {
   return (
     <Canvas
       orthographic
@@ -50,12 +46,12 @@ export function Scene({ terrain, forest, sim, wind, seed, onIgnite, clock }: Sce
     >
       <Lighting />
       <FireLights forest={forest} sim={sim} />
-      <SimDriver sim={sim} clock={clock} />
+      <SimDriver sim={sim} />
       <Slab terrain={terrain} forest={forest} sim={sim} />
       <Water terrain={terrain} />
       <Scatter terrain={terrain} forest={forest} seed={seed} />
       <Trees terrain={terrain} forest={forest} sim={sim} wind={wind} seed={seed} onIgnite={onIgnite} />
-      <FireEffects forest={forest} sim={sim} wind={wind} />
+      <FireEffects forest={forest} sim={sim} wind={wind} seed={seed} />
       <OrbitControls
         enablePan={false}
         enableDamping
@@ -97,15 +93,17 @@ function DeferredEffects() {
   )
 }
 
-/** Advances the simulation once per frame. The Scene never mutates sim state
+/** Advances the simulation once per frame, and with it the shared playback
+ *  clock every other animation loop reads. The Scene never mutates sim state
  *  anywhere else except through the ignite click. */
-function SimDriver({ sim, clock }: { sim: FireSim | null; clock?: { elapsed: number } }) {
+function SimDriver({ sim }: { sim: FireSim | null }) {
   useFrame((_, delta) => {
     if (!sim) return
-    // Clamp so a backgrounded tab does not resume with one enormous step.
-    const dt = Math.min(delta, 0.1)
+    // Clamp the raw frame time first, so a backgrounded tab does not resume
+    // with one enormous step, and only then scale it by the speed setting.
+    const dt = Math.min(delta, 0.1) * simClock.scale
+    simClock.time += dt
     sim.tick(dt)
-    if (clock) clock.elapsed += dt
   })
   return null
 }
@@ -143,7 +141,7 @@ function FireLights({ forest, sim }: { forest: Forest; sim: FireSim | null }) {
   useFrame((_, rawDelta) => {
     const g = group.current
     if (!g || !sim) return
-    const delta = Math.min(rawDelta, 0.1)
+    const delta = Math.min(rawDelta, 0.1) * simClock.scale
 
     sinceRetarget.current += delta
     if (sinceRetarget.current >= FIRE_LIGHT.retargetSeconds) {
@@ -306,7 +304,7 @@ function Slab({
     // Cooling runs every frame so the trailing edge fades smoothly. It sweeps
     // only the rect that currently holds heat, and costs nothing once the last
     // of it has gone out.
-    scorch.decayHeat(Math.min(rawDelta, 0.1))
+    scorch.decayHeat(Math.min(rawDelta, 0.1) * simClock.scale)
   })
 
   return (
@@ -434,8 +432,10 @@ function SpeciesGroup({
   const trunkRef = useRef<THREE.InstancedMesh>(null)
 
   // Per-tree fixed variation, derived once from the seed so a world reproduces.
+  // The size and pose come from `treeVariation`, keyed on cell id, because the
+  // fire effects need each tree's height to anchor its flames and cannot see
+  // this memo. Only `snow` is decided here, since it needs the terrain.
   const trees = useMemo(() => {
-    const rng = mulberry32(seed ^ (species === 'conifer' ? 0x9e37 : 0x85eb))
     let minH = Infinity
     let maxH = -Infinity
     for (const h of terrain.heightmap) {
@@ -445,19 +445,11 @@ function SpeciesGroup({
     const span = Math.max(maxH - minH, 1e-6)
     return forest.cells
       .filter((c) => c.species === species)
-      .map((cell) => {
-        const snow = (cell.position[1] - minH) / span > FOLIAGE.snowAbove
-        return {
-          cell,
-          height: BASE_TREE_HEIGHT * (1 + range(rng, -TREE_JITTER.height, TREE_JITTER.height)),
-          radius: 1 + range(rng, -TREE_JITTER.radius, TREE_JITTER.radius),
-          tiltX: range(rng, -TREE_JITTER.tiltRad, TREE_JITTER.tiltRad),
-          tiltZ: range(rng, -TREE_JITTER.tiltRad, TREE_JITTER.tiltRad),
-          spin: range(rng, 0, Math.PI * 2),
-          hue: rng(),
-          snow,
-        }
-      })
+      .map((cell) => ({
+        cell,
+        ...treeVariation(cell.id, seed),
+        snow: (cell.position[1] - minH) / span > FOLIAGE.snowAbove,
+      }))
   }, [forest, species, seed, terrain])
 
   const foliageGeo = useMemo(() => buildFoliage(species, mulberry32(seed + 17)), [species, seed])
@@ -543,7 +535,7 @@ function SpeciesGroup({
   // Per-frame: push burn progress into the instance attribute.
   useFrame((_, rawDelta) => {
     if (!sim) return
-    const delta = Math.min(rawDelta, 0.1)
+    const delta = Math.min(rawDelta, 0.1) * simClock.scale
     const arr = burnAttr.array as Float32Array
     let changed = false
     trees.forEach((t, i) => {
@@ -585,7 +577,7 @@ function SpeciesGroup({
           onIgnite?.(tree.cell.id)
         }}
       >
-        <BurnMaterial shrink windSpeed={wind.speed} />
+        <BurnMaterial shrink seatY={trunkHeightFraction(species)} windSpeed={wind.speed} />
       </instancedMesh>
       <instancedMesh
         ref={trunkRef}
@@ -594,7 +586,7 @@ function SpeciesGroup({
         receiveShadow
         frustumCulled={false}
       >
-        <BurnMaterial shrink={false} windSpeed={wind.speed} />
+        <BurnMaterial shrink={false} seatY={0} windSpeed={wind.speed} />
       </instancedMesh>
     </group>
   )
@@ -627,7 +619,7 @@ const TRUNK_SETTLE_FACTOR = 0.15
  * keeps the whole grove at one draw call per part rather than needing a
  * material per burn stage.
  */
-function burnMaterialImpl(shrink: boolean) {
+function burnMaterialImpl(shrink: boolean, seatY: number) {
   const mat = new THREE.MeshStandardMaterial({
     flatShading: true,
     roughness: 0.85,
@@ -672,11 +664,18 @@ function burnMaterialImpl(shrink: boolean) {
          vObjPos = position;
 
          // Foliage shrink starts early (0.15) so the crown is visibly
-         // thinning well before it fully chars; kept as it was, it read
-         // correctly and item 1/3 below did not touch it.
+         // thinning well before it fully chars.
+         //
+         // The pivot is NOT the object origin. Object origin is the tree base,
+         // but the crown is seated at the trunk top (trees.ts), so scaling
+         // "transformed" outright would walk the burning canopy down the trunk
+         // and leave it as a pellet at the tree's foot. Shrink xz freely and
+         // shrink y about the seat, so the crown collapses onto the trunk top
+         // where it actually sits.
          ${shrink
            ? `float shrinkF = mix(1.0, ${f(BURN.charredFoliageScale)}, smoothstep(0.15, 1.0, aBurn));
-              transformed *= shrinkF;`
+              transformed.xz *= shrinkF;
+              transformed.y = ${f(seatY)} + (transformed.y - ${f(seatY)}) * shrinkF;`
            : ''}
 
          // Structural slump: starts once the front has reached the crown
@@ -804,18 +803,18 @@ function burnMaterialImpl(shrink: boolean) {
   // hashes). Without a distinct key here they silently share one compiled
   // program and one of the two loses its shrink/settle behaviour. See the
   // matching note at diorama.ts:322 for the same failure mode elsewhere.
-  mat.customProgramCacheKey = () => `burn-${shrink ? 'foliage' : 'trunk'}`
+  mat.customProgramCacheKey = () => `burn-${shrink ? 'foliage' : 'trunk'}-${seatY}`
 
   return mat
 }
 
 /** Thin React wrapper so the patched material can be declared as JSX. */
-function BurnMaterial({ shrink, windSpeed }: { shrink: boolean; windSpeed: number }) {
-  const mat = useMemo(() => burnMaterialImpl(shrink), [shrink])
-  useFrame((state) => {
+function BurnMaterial({ shrink, seatY, windSpeed }: { shrink: boolean; seatY: number; windSpeed: number }) {
+  const mat = useMemo(() => burnMaterialImpl(shrink, seatY), [shrink, seatY])
+  useFrame(() => {
     const shader = (mat.userData as { shader?: THREE.WebGLProgramParametersWithUniforms }).shader
     if (!shader) return
-    shader.uniforms.uTime!.value = state.clock.elapsedTime
+    shader.uniforms.uTime!.value = simClock.time
     shader.uniforms.uWindSpeed!.value = windSpeed
   })
   useEffect(() => () => mat.dispose(), [mat])

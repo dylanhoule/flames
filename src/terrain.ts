@@ -29,8 +29,18 @@ const HEIGHT_FRACTION: Record<Landform, number> = {
   rolling: ROLLING_HEIGHT_FRACTION,
 }
 
-/** Slope (rise/run) above which a vertex gets snapped to a terrace step. */
+/** Slope (rise/run) at which terracing starts to bite. */
 const TERRACE_SLOPE_THRESHOLD = 0.6
+
+/**
+ * Slope at which a vertex snaps all the way onto its step. Between the two the
+ * snap is blended in, because a binary test at 0.6 terraced whole landforms
+ * rather than their cliff faces: a peak's flank clears 0.6 over 22% of the map
+ * but almost never reaches 1.8, so the entire cone came out as a ziggurat, and
+ * the quantised treads broke the elevation bands into speckle. A ridge-valley
+ * still puts ~6% of its vertices above 1.8, so real cliff bands survive.
+ */
+const TERRACE_CLIFF_SLOPE = 1.8
 
 /** Number of discrete elevation steps spanning the full height range. */
 const TERRACE_LEVELS = 9
@@ -92,6 +102,15 @@ function ridgedFbm(
   return sum / norm
 }
 
+/**
+ * Slope of the seabed beyond the cone's base, per unit of normalised distance.
+ * Clamping the falloff at zero instead left a dead-flat floor over ~18% of the
+ * map; WATER_PERCENTILE then landed inside that tie block, so the water plane
+ * came out exactly coplanar with the ground (z-fighting stripes) and the sea
+ * had no depth for the sand band to sit above.
+ */
+const PEAK_SEABED_SLOPE = 0.5
+
 /** Radial falloff from a seeded center, fbm-detailed. One dominant mountain. */
 function heightPeak(rng: Rng, noise2D: NoiseFunction2D, half: number, size: number) {
   const cx = range(rng, -0.3, 0.3) * half
@@ -103,8 +122,10 @@ function heightPeak(rng: Rng, noise2D: NoiseFunction2D, half: number, size: numb
     const dx = x - cx
     const dz = z - cz
     const dist = Math.sqrt(dx * dx + dz * dz) / (half * 1.1)
-    const falloff = Math.max(0, 1 - dist)
-    const shaped = Math.pow(falloff, power)
+    const falloff = 1 - dist
+    // Past the base the ground keeps descending, linearly so the seabed has a
+    // constant grade rather than the tangentially-flat one a power curve gives.
+    const shaped = falloff >= 0 ? Math.pow(falloff, power) : falloff * PEAK_SEABED_SLOPE
     const detail = fbm(noise2D, x * detailFreq, z * detailFreq, 4, 0.5, 2)
     return shaped + shaped * detail * detailStrength
   }
@@ -246,16 +267,21 @@ export function generateTerrain(rng: Rng, opts: TerrainOptions = {}): TerrainFie
     raw[k] = ((raw[k]! - min) / span) * maxHeight
   }
 
-  // Hybrid terracing: steep vertices snap to discrete step levels (stacked cliff bands),
-  // gentle vertices keep their continuous value (the fire sim's slope input stays smooth
-  // there instead of becoming all-or-nothing).
+  // Hybrid terracing: cliff-steep vertices snap to discrete step levels (stacked cliff
+  // bands), gentle vertices keep their continuous value (the fire sim's slope input stays
+  // smooth there instead of becoming all-or-nothing), and the band between eases from one
+  // to the other so a uniformly steep landform keeps its silhouette.
   const stepHeight = maxHeight / TERRACE_LEVELS
   const heightmap = new Float32Array(n)
   for (let j = 0; j < resolution; j++) {
     for (let i = 0; i < resolution; i++) {
       const idx = j * resolution + i
       const slope = gridSlopeMagnitude(raw, resolution, cellSize, i, j)
-      heightmap[idx] = slope > TERRACE_SLOPE_THRESHOLD ? Math.round(raw[idx]! / stepHeight) * stepHeight : raw[idx]!
+      const snapped = Math.round(raw[idx]! / stepHeight) * stepHeight
+      const blend = smoothstep(TERRACE_SLOPE_THRESHOLD, TERRACE_CLIFF_SLOPE, slope)
+      // Full snap stays a separate branch so a cliff tread is exactly flat:
+      // lerping by 1.0 is not bit-identical to the step it is lerping toward.
+      heightmap[idx] = blend >= 1 ? snapped : raw[idx]! + (snapped - raw[idx]!) * blend
     }
   }
 

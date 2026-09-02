@@ -16,6 +16,8 @@ const BUTTON: React.CSSProperties = {
 export interface ControlsProps {
   wind: Wind
   onWind: (w: Wind) => void
+  speed: number
+  onSpeed: (s: number) => void
   onRegenerate: () => void
   seed: number
   landform: Landform
@@ -30,7 +32,7 @@ export interface ControlsProps {
  * so it gets both a numeric speed and a direction dial you can see pointing.
  */
 export function Controls({
-  wind, onWind, onRegenerate, seed, landform, treeCount, burning, charred, elapsed,
+  wind, onWind, speed, onSpeed, onRegenerate, seed, landform, treeCount, burning, charred, elapsed,
 }: ControlsProps) {
   const deg = Math.round((wind.directionRad * 180) / Math.PI)
   return (
@@ -56,6 +58,15 @@ export function Controls({
       </label>
 
       <Compass directionRad={wind.directionRad} speed={wind.speed} />
+
+      <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <span style={{ opacity: 0.7 }}>speed {speed.toFixed(2)}&times;</span>
+        <input
+          type="range" min={0.25} max={3} step={0.05} value={speed}
+          onChange={(e) => onSpeed(Number(e.target.value))}
+          style={{ width: 130 }}
+        />
+      </label>
 
       <span style={{ opacity: 0.6, lineHeight: 1.5 }}>
         seed {seed} &middot; {landform}<br />

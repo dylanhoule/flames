@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Scene } from './Scene'
 import { Controls } from './ui/Controls'
 import { generateTerrain } from './terrain'
 import { generateForest } from './forest'
 import { createFireSim } from './fire'
 import { mulberry32 } from './rng'
+import { REALTIME_SCALE, simClock } from './simClock'
 import { BACKDROP } from './visual'
 import { BURNING, CHARRED } from './types'
 import type { Wind } from './types'
@@ -14,7 +15,7 @@ export function App() {
   const [seed, setSeed] = useState(() => (Math.random() * 0x7fffffff) >>> 0)
   const [wind, setWind] = useState<Wind>({ speed: 3, directionRad: 0 })
   const [tally, setTally] = useState({ burning: 0, charred: 0, elapsed: 0 })
-  const clock = useRef({ elapsed: 0 })
+  const [speed, setSpeed] = useState(1)
 
   // One rng threaded through both generators, so a seed fully determines a
   // world. Regenerate is always enabled, including mid-burn: this rebuilds
@@ -35,9 +36,16 @@ export function App() {
     world.sim.wind = { ...wind }
   }, [wind, world])
 
+  // Speed is the same kind of live lever, pushed at the shared playback clock
+  // that drives the sim and every animation loop. 1.0x is REALTIME_SCALE of
+  // the pace fire.ts is tuned for, so the fire's own constants stay untouched.
+  useEffect(() => {
+    simClock.scale = speed * REALTIME_SCALE
+  }, [speed])
+
   // Poll the sim for the HUD counts. Cheap, and keeps sim state out of React.
   useEffect(() => {
-    clock.current.elapsed = 0
+    simClock.time = 0
     const id = setInterval(() => {
       let burning = 0
       let charred = 0
@@ -45,7 +53,7 @@ export function App() {
         if (s === BURNING) burning++
         else if (s === CHARRED) charred++
       }
-      const elapsed = Math.round(clock.current.elapsed)
+      const elapsed = Math.round(simClock.time)
       setTally((prev) =>
         prev.burning === burning && prev.charred === charred && prev.elapsed === elapsed
           ? prev
@@ -67,11 +75,12 @@ export function App() {
         wind={wind}
         seed={seed}
         onIgnite={ignite}
-        clock={clock.current}
       />
       <Controls
         wind={wind}
         onWind={setWind}
+        speed={speed}
+        onSpeed={setSpeed}
         onRegenerate={() => setSeed((s) => s + 1)}
         seed={seed}
         landform={world.terrain.landform}
