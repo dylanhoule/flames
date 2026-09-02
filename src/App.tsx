@@ -63,6 +63,7 @@ export function App() {
         terrain={world.terrain}
         forest={world.forest}
         sim={world.sim}
+        wind={wind}
         seed={seed}
         onIgnite={ignite}
         clock={clock.current}

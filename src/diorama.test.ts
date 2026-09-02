@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { Color } from 'three'
-import { buildDiorama } from './diorama'
-import { CLIFF_COLOR } from './visual'
+import { buildDiorama, ScorchMap } from './diorama'
+import { CLIFF_COLOR, SCORCH } from './visual'
 import type { Slope, TerrainField } from './types'
 
 /**
@@ -102,5 +102,41 @@ describe('diorama', () => {
     expect(hasCliff(fakeTerrain((u) => (u < 0.5 ? 0 : 40)))).toBe(true)
     // Dead flat ground must not.
     expect(hasCliff(flat)).toBe(false)
+  })
+})
+
+describe('scorch map', () => {
+  it('darkens where it is stamped and leaves distant ground clean', () => {
+    const scorch = new ScorchMap(100)
+    expect(scorch.sample(0, 0)).toBe(0)
+
+    scorch.stamp(0, 0)
+    expect(scorch.sample(0, 0)).toBeGreaterThan(SCORCH.strength * 0.9)
+    // Falls off with distance rather than tiling a hard disc.
+    expect(scorch.sample(2, 0)).toBeLessThan(scorch.sample(0, 0))
+    // Well outside SCORCH.radius, untouched.
+    expect(scorch.sample(40, 40)).toBe(0)
+  })
+
+  it('keeps the strongest stamp where scars overlap', () => {
+    const scorch = new ScorchMap(100)
+    scorch.stamp(0, 0)
+    const peak = scorch.sample(0, 0)
+    scorch.stamp(2, 0) // overlapping, weaker at the original centre
+    expect(scorch.sample(0, 0)).toBeGreaterThanOrEqual(peak)
+  })
+
+  it('maps world coordinates to the right corner of the mask', () => {
+    const scorch = new ScorchMap(100)
+    scorch.stamp(-40, -40)
+    expect(scorch.sample(-40, -40)).toBeGreaterThan(SCORCH.strength * 0.9)
+    expect(scorch.sample(40, 40)).toBe(0)
+  })
+
+  it('clears back to clean ground', () => {
+    const scorch = new ScorchMap(100)
+    scorch.stamp(0, 0)
+    scorch.clear()
+    expect(scorch.sample(0, 0)).toBe(0)
   })
 })

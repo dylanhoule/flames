@@ -64,9 +64,9 @@ export const STRATA = [
 export const SCORCH = {
   color: '#241d18',
   /** World-unit radius a charred tree darkens around itself. */
-  radius: 3.2,
+  radius: 6,
   /** Peak darkening strength, 0..1. */
-  strength: 0.8,
+  strength: 0.5,
 } as const
 
 // ------------------------------------------------------------------ water
@@ -124,7 +124,7 @@ export const BURN = {
 
 export const SMOKE = {
   color: '#9aa3ab',
-  opacity: 0.32,
+  opacity: 0.2,
   /** Metres per second of rise, before wind advection. */
   rise: 2.4,
   /** Seconds a column keeps emitting after its cell chars. */

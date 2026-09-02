@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { TerrainField } from './types'
-import { CLIFF_COLOR, CLIFF_SLOPE, ELEVATION_BANDS, STRATA } from './visual'
+import { CLIFF_COLOR, CLIFF_SLOPE, ELEVATION_BANDS, SCORCH, STRATA } from './visual'
 
 /**
  * Geometry for the diorama slab: the terrain surface, the cut sides showing
@@ -193,4 +193,133 @@ function finalise(positions: number[], colors: number[]): THREE.BufferGeometry {
   geo.computeVertexNormals()
   geo.computeBoundingSphere()
   return geo
+}
+
+
+// ------------------------------------------------------------- burn scar
+
+/** Resolution of the scorch mask over the footprint. */
+const SCORCH_RES = 256
+
+/**
+ * A single-channel mask of where fire has been, stamped as cells char and
+ * sampled by the terrain shader.
+ *
+ * This is the aftermath read: once the front has passed, the scar on the
+ * ground is what still shows the path the fire actually took. It is a texture
+ * rather than vertex colours so the darkening does not have to align with the
+ * terrain's triangulation.
+ */
+export class ScorchMap {
+  readonly texture: THREE.DataTexture
+  private readonly data: Uint8Array
+  private readonly size: number
+
+  constructor(size: number) {
+    this.size = size
+    this.data = new Uint8Array(SCORCH_RES * SCORCH_RES * 4)
+    this.texture = new THREE.DataTexture(this.data, SCORCH_RES, SCORCH_RES, THREE.RGBAFormat)
+    this.texture.minFilter = THREE.LinearFilter
+    this.texture.magFilter = THREE.LinearFilter
+    this.texture.wrapS = THREE.ClampToEdgeWrapping
+    this.texture.wrapT = THREE.ClampToEdgeWrapping
+    this.texture.needsUpdate = true
+  }
+
+  /** Darken a soft disc around a world xz position. Idempotent-ish: keeps the max. */
+  stamp(x: number, z: number): void {
+    const half = this.size / 2
+    const perUnit = SCORCH_RES / this.size
+    const cx = (x + half) * perUnit
+    const cz = (z + half) * perUnit
+    const r = SCORCH.radius * perUnit
+    const peak = SCORCH.strength * 255
+
+    const i0 = Math.max(0, Math.floor(cx - r))
+    const i1 = Math.min(SCORCH_RES - 1, Math.ceil(cx + r))
+    const j0 = Math.max(0, Math.floor(cz - r))
+    const j1 = Math.min(SCORCH_RES - 1, Math.ceil(cz + r))
+
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const d = Math.hypot(i - cx, j - cz) / r
+        if (d >= 1) continue
+        // Smooth falloff so scars blend into one another instead of tiling discs.
+        const falloff = (1 - d) * (1 - d)
+        const v = peak * falloff
+        const idx = (j * SCORCH_RES + i) * 4
+        if (v > this.data[idx]!) {
+          this.data[idx] = v
+          this.data[idx + 3] = 255
+        }
+      }
+    }
+    this.texture.needsUpdate = true
+  }
+
+  /** Value at a world position, 0..1. Exposed for tests. */
+  sample(x: number, z: number): number {
+    const half = this.size / 2
+    const perUnit = SCORCH_RES / this.size
+    const i = Math.round((x + half) * perUnit)
+    const j = Math.round((z + half) * perUnit)
+    if (i < 0 || j < 0 || i >= SCORCH_RES || j >= SCORCH_RES) return 0
+    return this.data[(j * SCORCH_RES + i) * 4]! / 255
+  }
+
+  clear(): void {
+    this.data.fill(0)
+    this.texture.needsUpdate = true
+  }
+
+  dispose(): void {
+    this.texture.dispose()
+  }
+}
+
+/**
+ * Patch a terrain material to darken where the scorch mask is set.
+ *
+ * Injected rather than written as a custom material so the surface keeps all of
+ * MeshStandardMaterial's lighting; only the base colour is modified.
+ */
+export function applyScorch(
+  material: THREE.MeshStandardMaterial,
+  scorch: ScorchMap,
+  size: number,
+): void {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uScorch = { value: scorch.texture }
+    shader.uniforms.uScorchColor = { value: new THREE.Color(SCORCH.color) }
+    shader.uniforms.uFootprint = { value: size }
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\n varying vec3 vWorld;')
+      .replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\n vWorld = (modelMatrix * vec4(position, 1.0)).xyz;',
+      )
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+         uniform sampler2D uScorch;
+         uniform vec3 uScorchColor;
+         uniform float uFootprint;
+         varying vec3 vWorld;`,
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+         vec2 scorchUv = (vWorld.xz / uFootprint) + 0.5;
+         float scorch = texture2D(uScorch, scorchUv).r;
+         diffuseColor.rgb = mix(diffuseColor.rgb, uScorchColor, clamp(scorch, 0.0, 1.0));`,
+      )
+  }
+  // Without this, three caches compiled programs by material parameters and
+  // hands this material the slab sides' identical-looking program, which has
+  // none of the injection above. The scar then silently never renders.
+  material.customProgramCacheKey = () => 'terrain-scorch'
+  material.needsUpdate = true
 }

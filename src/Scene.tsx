@@ -4,13 +4,16 @@ import { OrbitControls } from '@react-three/drei'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
 
-import { buildDiorama } from './diorama'
+import { applyScorch, buildDiorama, ScorchMap } from './diorama'
+import { FireEffects } from './fx'
 import { buildFoliage, buildTrunk } from './trees'
+import { generateScatter } from './scatter'
+import type { ScatterProp } from './scatter'
 import { mulberry32, range } from './rng'
-import type { FireSim, Forest, Species, TerrainField } from './types'
+import type { FireSim, Forest, Species, TerrainField, Wind } from './types'
 import { BURNING, CHARRED } from './types'
 import {
-  BACKDROP, BURN, CAMERA, FOLIAGE, LIGHTS, POST, TREE_JITTER, TRUNK, WATER,
+  BACKDROP, BURN, CAMERA, CLIFF_COLOR, FOLIAGE, LIGHTS, POST, TREE_JITTER, TRUNK, WATER,
 } from './visual'
 
 /** Height of a tree in world units, before per-instance jitter. */
@@ -20,6 +23,7 @@ export interface SceneProps {
   terrain: TerrainField
   forest: Forest
   sim: FireSim | null
+  wind: Wind
   seed: number
   onIgnite?: (cellId: number) => void
   /** Mutated in place with total SIMULATED seconds advanced. */
@@ -30,7 +34,7 @@ export interface SceneProps {
  * The diorama. Reads simulation state every frame and pushes it into instanced
  * attributes; it never mutates the sim except through the ignite click.
  */
-export function Scene({ terrain, forest, sim, seed, onIgnite, clock }: SceneProps) {
+export function Scene({ terrain, forest, sim, wind, seed, onIgnite, clock }: SceneProps) {
   return (
     <Canvas
       orthographic
@@ -45,9 +49,11 @@ export function Scene({ terrain, forest, sim, seed, onIgnite, clock }: SceneProp
     >
       <Lighting />
       <SimDriver sim={sim} clock={clock} />
-      <Slab terrain={terrain} />
+      <Slab terrain={terrain} forest={forest} sim={sim} />
       <Water terrain={terrain} />
-      <Trees terrain={terrain} forest={forest} sim={sim} seed={seed} onIgnite={onIgnite} />
+      <Scatter terrain={terrain} forest={forest} seed={seed} />
+      <Trees terrain={terrain} forest={forest} sim={sim} wind={wind} seed={seed} onIgnite={onIgnite} />
+      <FireEffects forest={forest} sim={sim} wind={wind} />
       <OrbitControls
         enablePan={false}
         enableDamping
@@ -131,18 +137,116 @@ function Lighting() {
 }
 
 /** Terrain surface plus the cut sides that make the slab read as a model. */
-function Slab({ terrain }: { terrain: TerrainField }) {
+function Slab({
+  terrain, forest, sim,
+}: { terrain: TerrainField; forest: Forest; sim: FireSim | null }) {
   const { surface, sides } = useMemo(() => buildDiorama(terrain), [terrain])
   useEffect(() => () => { surface.dispose(); sides.dispose() }, [surface, sides])
+
+  const scorch = useMemo(() => new ScorchMap(terrain.size), [terrain])
+  useEffect(() => () => scorch.dispose(), [scorch])
+
+  const surfaceMat = useMemo(() => {
+    const m = new THREE.MeshStandardMaterial({
+      vertexColors: true, flatShading: true, roughness: 0.95, metalness: 0,
+    })
+    applyScorch(m, scorch, terrain.size)
+    return m
+  }, [scorch, terrain])
+  useEffect(() => () => surfaceMat.dispose(), [surfaceMat])
+
+  // Stamp the scar only when a cell newly chars, never per frame: the upload
+  // is the expensive part and charring is rare relative to the frame rate.
+  const stamped = useRef<Set<number>>(new Set())
+  useEffect(() => { stamped.current = new Set(); scorch.clear() }, [scorch])
+  useFrame(() => {
+    if (!sim) return
+    for (const cell of forest.cells) {
+      if (sim.states[cell.id] !== CHARRED || stamped.current.has(cell.id)) continue
+      stamped.current.add(cell.id)
+      scorch.stamp(cell.position[0], cell.position[2])
+    }
+  })
+
   return (
     <group>
-      <mesh geometry={surface} castShadow receiveShadow>
-        <meshStandardMaterial vertexColors flatShading roughness={0.95} metalness={0} />
-      </mesh>
+      <mesh geometry={surface} material={surfaceMat} castShadow receiveShadow />
       <mesh geometry={sides} receiveShadow>
         <meshStandardMaterial vertexColors flatShading roughness={1} metalness={0} />
       </mesh>
     </group>
+  )
+}
+
+/**
+ * Boulders and fallen logs, two instanced draw calls. Decorative only: they
+ * carry no fuel and the simulation never sees them.
+ */
+function Scatter({
+  terrain, forest, seed,
+}: { terrain: TerrainField; forest: Forest; seed: number }) {
+  const props = useMemo(
+    () => generateScatter(terrain, forest, mulberry32(seed ^ 0x5ca7)),
+    [terrain, forest, seed],
+  )
+  const boulders = useMemo(() => props.filter((p) => p.kind === 'boulder'), [props])
+  const logs = useMemo(() => props.filter((p) => p.kind === 'log'), [props])
+  return (
+    <>
+      <PropGroup items={boulders} kind="boulder" />
+      <PropGroup items={logs} kind="log" />
+    </>
+  )
+}
+
+function PropGroup({ items, kind }: { items: ScatterProp[]; kind: 'boulder' | 'log' }) {
+  const ref = useRef<THREE.InstancedMesh>(null)
+
+  const geometry = useMemo(() => {
+    if (kind === 'boulder') {
+      // Detail 0 keeps the facets big, matching the low-poly terrain.
+      const g = new THREE.IcosahedronGeometry(1, 0)
+      g.scale(1, 0.72, 1)
+      return g
+    }
+    const g = new THREE.CylinderGeometry(0.34, 0.42, 3.4, 6)
+    g.rotateZ(Math.PI / 2) // lay it on its side
+    return g
+  }, [kind])
+  useEffect(() => () => geometry.dispose(), [geometry])
+
+  useLayoutEffect(() => {
+    const mesh = ref.current
+    if (!mesh) return
+    const m = new THREE.Matrix4()
+    const q = new THREE.Quaternion()
+    const e = new THREE.Euler()
+    const pos = new THREE.Vector3()
+    const scl = new THREE.Vector3()
+    items.forEach((p, i) => {
+      e.set(p.tilt, p.spin, p.tilt * 0.5)
+      q.setFromEuler(e)
+      pos.set(p.position[0], p.position[1] + (kind === 'boulder' ? 0.35 : 0.3) * p.scale, p.position[2])
+      scl.setScalar(p.scale)
+      m.compose(pos, q, scl)
+      mesh.setMatrixAt(i, m)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+    mesh.computeBoundingSphere()
+  }, [items, kind])
+
+  const color = kind === 'boulder' ? CLIFF_COLOR : TRUNK.color
+  return (
+    <instancedMesh
+      ref={ref}
+      args={[geometry, undefined, Math.max(items.length, 1)]}
+      castShadow
+      receiveShadow
+      frustumCulled={false}
+      count={items.length}
+    >
+      <meshStandardMaterial color={color} flatShading roughness={0.95} metalness={0} />
+    </instancedMesh>
   )
 }
 
