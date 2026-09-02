@@ -1,18 +1,5 @@
 import type { Landform, Wind } from '../types'
 
-const PANEL: React.CSSProperties = {
-  position: 'absolute', left: 16, bottom: 16,
-  display: 'flex', gap: 18, alignItems: 'center',
-  padding: '12px 16px', borderRadius: 12,
-  background: 'rgba(20,22,25,0.82)', border: '1px solid #333a42',
-  backdropFilter: 'blur(8px)', color: '#e6e9ec', fontSize: 12,
-}
-
-const BUTTON: React.CSSProperties = {
-  padding: '8px 14px', borderRadius: 8, border: '1px solid #3a4048',
-  background: '#22262c', color: '#e6e9ec', cursor: 'pointer', font: 'inherit',
-}
-
 export interface ControlsProps {
   wind: Wind
   onWind: (w: Wind) => void
@@ -36,39 +23,36 @@ export function Controls({
 }: ControlsProps) {
   const deg = Math.round((wind.directionRad * 180) / Math.PI)
   return (
-    <div style={PANEL}>
-      <button style={BUTTON} onClick={onRegenerate}>Regenerate</button>
+    <div className="panel">
+      <button className="panel-button" onClick={onRegenerate}>Regenerate</button>
 
-      <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span style={{ opacity: 0.7 }}>wind {wind.speed.toFixed(1)} m/s</span>
+      <label className="panel-field">
+        <span>wind {wind.speed.toFixed(1)} m/s</span>
         <input
           type="range" min={0} max={14} step={0.5} value={wind.speed}
           onChange={(e) => onWind({ ...wind, speed: Number(e.target.value) })}
-          style={{ width: 130 }}
         />
       </label>
 
-      <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span style={{ opacity: 0.7 }}>direction {deg}&deg;</span>
+      <label className="panel-field">
+        <span>direction {deg}&deg;</span>
         <input
           type="range" min={0} max={360} step={5} value={deg}
           onChange={(e) => onWind({ ...wind, directionRad: (Number(e.target.value) * Math.PI) / 180 })}
-          style={{ width: 130 }}
         />
       </label>
 
       <Compass directionRad={wind.directionRad} speed={wind.speed} />
 
-      <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span style={{ opacity: 0.7 }}>speed {speed.toFixed(2)}&times;</span>
+      <label className="panel-field">
+        <span>speed {speed.toFixed(2)}&times;</span>
         <input
           type="range" min={0.25} max={3} step={0.05} value={speed}
           onChange={(e) => onSpeed(Number(e.target.value))}
-          style={{ width: 130 }}
         />
       </label>
 
-      <span style={{ opacity: 0.6, lineHeight: 1.5 }}>
+      <span className="panel-stats">
         seed {seed} &middot; {landform}<br />
         {treeCount} trees &middot; {burning} burning &middot; {charred} charred &middot; {elapsed}s
       </span>
@@ -83,14 +67,20 @@ function Compass({ directionRad, speed }: { directionRad: number; speed: number 
   // +x is 0 and +z is 90 degrees in world space; screen y grows downward.
   const x = r + Math.cos(directionRad) * r * 0.66
   const y = r + Math.sin(directionRad) * r * 0.66
+  const color = speed > 0 ? '#ff9a4a' : '#5d666f'
   return (
     <svg width={size} height={size} aria-label="wind direction">
       <circle cx={r} cy={r} r={r - 1} fill="#181b1f" stroke="#3a4048" />
+      {/* shaft stops short so it does not poke through the head */}
       <line
-        x1={r - (x - r)} y1={r - (y - r)} x2={x} y2={y}
-        stroke={speed > 0 ? '#ff9a4a' : '#5d666f'} strokeWidth={2} strokeLinecap="round"
+        x1={r - (x - r)} y1={r - (y - r)}
+        x2={r + (x - r) * 0.6} y2={r + (y - r) * 0.6}
+        stroke={color} strokeWidth={2} strokeLinecap="round"
       />
-      <circle cx={x} cy={y} r={3} fill={speed > 0 ? '#ff9a4a' : '#5d666f'} />
+      <polygon
+        points="0,-4.5 8,0 0,4.5" fill={color}
+        transform={`translate(${x} ${y}) rotate(${(directionRad * 180) / Math.PI}) translate(-8 0)`}
+      />
     </svg>
   )
 }

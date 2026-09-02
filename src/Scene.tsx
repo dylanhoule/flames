@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
@@ -17,6 +17,13 @@ import {
 } from './visual'
 import { BURN_SHADING_GLSL, burnIntensity, glslColor } from './burnShading'
 import { simClock } from './simClock'
+
+/**
+ * Pointer travel in CSS pixels above which a click is a camera drag, not a tap
+ * on a tree. Small enough that a deliberate tap with a shaky thumb still
+ * ignites, large enough that starting an orbit does not.
+ */
+const IGNITE_DRAG_SLOP = 6
 
 export interface SceneProps {
   terrain: TerrainField
@@ -52,16 +59,45 @@ export function Scene({ terrain, forest, sim, wind, seed, onIgnite }: SceneProps
       <Scatter terrain={terrain} forest={forest} seed={seed} />
       <Trees terrain={terrain} forest={forest} sim={sim} wind={wind} seed={seed} onIgnite={onIgnite} />
       <FireEffects forest={forest} sim={sim} wind={wind} seed={seed} />
-      <OrbitControls
-        enablePan={false}
-        enableDamping
-        minPolarAngle={CAMERA.minPolarRad}
-        maxPolarAngle={CAMERA.maxPolarRad}
-        minZoom={CAMERA.minZoom}
-        maxZoom={CAMERA.maxZoom}
-      />
+      <CameraRig />
       <DeferredEffects />
     </Canvas>
+  )
+}
+
+/**
+ * Fits the orthographic framing to the viewport, and owns the orbit limits
+ * because they are derived from the same fitted zoom.
+ *
+ * Zoom is pixels per world unit, so a fixed zoom crops a narrow screen instead
+ * of scaling it. Fit to whichever axis is tighter, and never zoom in past the
+ * tuned desktop value, so a wide desktop keeps exactly the framing it has now.
+ *
+ * Refitting on resize deliberately discards a pinch-zoom the viewer has set.
+ * The body cannot scroll, so in practice that only happens on an orientation
+ * change, where a reframe is what you want anyway.
+ */
+function CameraRig() {
+  const camera = useThree((s) => s.camera)
+  const width = useThree((s) => s.size.width)
+  const height = useThree((s) => s.size.height)
+
+  const zoom = Math.min(CAMERA.zoom, width / CAMERA.fitWidth, height / CAMERA.fitHeight)
+
+  useLayoutEffect(() => {
+    camera.zoom = zoom
+    camera.updateProjectionMatrix()
+  }, [camera, zoom])
+
+  return (
+    <OrbitControls
+      enablePan={false}
+      enableDamping
+      minPolarAngle={CAMERA.minPolarRad}
+      maxPolarAngle={CAMERA.maxPolarRad}
+      minZoom={zoom * CAMERA.minZoomRatio}
+      maxZoom={zoom * CAMERA.maxZoomRatio}
+    />
   )
 }
 
@@ -570,6 +606,11 @@ function SpeciesGroup({
         receiveShadow
         frustumCulled={false}
         onClick={(e) => {
+          // One-finger drag is how you orbit, and r3f fires a click whenever
+          // pointerdown and pointerup hit the same object however far the
+          // pointer travelled between them. Without this, orbiting the camera
+          // sets the forest alight.
+          if (e.delta > IGNITE_DRAG_SLOP) return
           if (e.instanceId === undefined) return
           const tree = trees[e.instanceId]
           if (!tree) return

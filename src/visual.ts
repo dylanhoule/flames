@@ -384,6 +384,25 @@ export const CAMERA = {
   /** Clamp so the viewer always looks down at the model, never up from below. */
   minPolarRad: 0.35,
   maxPolarRad: 1.32,
-  minZoom: 4,
-  maxZoom: 26,
+  /**
+   * Orthographic zoom is pixels per world unit, so a fixed zoom crops rather
+   * than scales: a phone-width viewport at zoom 9 sees 43 world units of a
+   * 100-unit slab. These are the world units the framing has to cover, and
+   * the Scene fits zoom to whichever axis is tighter. Width is the slab's
+   * screen diagonal plus margin; height is its iso-compressed footprint plus
+   * the tallest peak. Height is NOT the model's true extent, which is larger:
+   * it is the ~84 units a desktop window has always shown at zoom 9, so the
+   * fit reproduces the tuned framing rather than zooming out to reveal more
+   * of the slab sides than the diorama was ever composed to show.
+   */
+  fitWidth: 150,
+  fitHeight: 84,
+  /**
+   * Orbit zoom limits as ratios of the fitted zoom, so they scale with the
+   * viewport instead of clamping a small screen back to a cropped framing.
+   * These are the old absolutes (4 and 26) over the desktop zoom of 9, so the
+   * desktop range is unchanged.
+   */
+  minZoomRatio: 0.45,
+  maxZoomRatio: 2.9,
 } as const

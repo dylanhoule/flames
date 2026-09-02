@@ -5,4 +5,99 @@ body {
   background: #141619;
   color: #e6e9ec;
   overflow: hidden;
+  /* The canvas already sets touch-action: none via OrbitControls; this stops
+     pull-to-refresh over the control bar, which is a plain DOM sibling. */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ------------------------------------------------------------- control bar
+   Lives here rather than in inline styles so it can carry media queries.
+   The base rules are the desktop appearance; wrap and max-width are inert
+   there and do all the work once the viewport is narrower than the row. */
+
+.panel {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: center;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: rgba(20, 22, 25, 0.82);
+  border: 1px solid #333a42;
+  backdrop-filter: blur(8px);
+  color: #e6e9ec;
+  font-size: 12px;
+}
+
+.panel-button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #3a4048;
+  background: #22262c;
+  color: #e6e9ec;
+  cursor: pointer;
+  font: inherit;
+}
+
+.panel-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* Keeps its 130px desktop width, but is allowed to shrink to share a row.
+     Explicitly no grow: growing stretches the bar across the whole desktop. */
+  flex: 0 1 130px;
+  min-width: 0;
+}
+
+.panel-field > span { opacity: 0.7; }
+.panel-field > input { width: 100%; }
+
+.panel-stats {
+  opacity: 0.6;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .panel {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    max-width: none;
+    gap: 10px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+  /* One slider per row: three 130px sliders side by side on a phone leaves
+     each of them too short to aim at. The label goes beside the slider rather
+     than above it, which is a third of the bar's height across three fields. */
+  .panel-field {
+    flex-basis: 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+  /* Fixed so the three sliders start at the same x. Sized for the longest
+     label the values can produce, "direction 360°", measured at 81.5px, plus
+     headroom for a platform font that is not the one this was measured in. */
+  .panel-field > span { flex: 0 0 90px; }
+  /* Its own line, never wedged into the gap beside the compass. */
+  .panel-stats { flex-basis: 100%; }
+  /* Full-width sliders would otherwise strand the compass alone on a row of
+     its own, costing ~50px of a phone screen for a 40px dial. Pull it up
+     beside the button, which leaves both sharing one short row. */
+  .panel-button { order: -2; }
+  .panel > svg { order: -1; }
+}
+
+@media (pointer: coarse) {
+  .panel-button { min-height: 44px; }
+  /* A taller box is a taller hit area, because the pointer events land on the
+     input itself. Deliberately not restyling the thumb: that means opting out
+     of the native track too, for a control that already works under a thumb. */
+  .panel input[type='range'] { height: 28px; }
+  .panel-stats { font-size: 13px; }
 }
