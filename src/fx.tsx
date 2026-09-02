@@ -309,6 +309,7 @@ function Flames({ forest, sim, wind }: FxProps) {
       uniforms: {
         uTime: { value: 0 },
         uWindLean: { value: new THREE.Vector2(0, 0) },
+        uWindSpeed: { value: 0 },
       },
       // Height and brightness now come from the shared burn phase curve
       // (preheat / crown flash / sustained / smoulder) instead of an ad-hoc
@@ -318,6 +319,7 @@ function Flames({ forest, sim, wind }: FxProps) {
       fragmentShader: /* glsl */ `
         ${BURN_SHADING_GLSL}
         uniform float uTime;
+        uniform float uWindSpeed;
         varying vec2 vUv;
         varying float vAge;
         varying float vSeed;
@@ -331,7 +333,10 @@ function Flames({ forest, sim, wind }: FxProps) {
           // Licking motion: scroll noise upward, seeded per tongue.
           float n = noise(vec2(vUv.x * 3.0 + vSeed * 19.0, vUv.y * 2.5 - uTime * 2.2 + vSeed * 7.0));
           float flicker = 0.55 + 0.75 * n;
-          float envelope = burnIntensity(vAge);
+          // Slow wind-driven surge, the same function and clock the trees'
+          // own emissive uses, so flames and foliage breathe together rather
+          // than wobbling on two unrelated timers.
+          float envelope = burnIntensity(vAge) * gust(uTime, uWindSpeed);
           float shape = body * smoothstep(0.0, 0.35, taper) * flicker;
           float alpha = shape * envelope;
           if (alpha < 0.02) discard;
@@ -366,6 +371,7 @@ function Flames({ forest, sim, wind }: FxProps) {
       Math.cos(wind.directionRad) * wind.speed * FLAME.windLean,
       Math.sin(wind.directionRad) * wind.speed * FLAME.windLean,
     )
+    material.uniforms.uWindSpeed!.value = wind.speed
 
     const ageArr = age.array as Float32Array
     for (let c = 0; c < forest.cells.length; c++) {

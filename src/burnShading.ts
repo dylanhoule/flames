@@ -15,7 +15,7 @@
  * frame for nothing.
  */
 
-import { BURN } from './visual'
+import { BURN, GUST } from './visual'
 
 /** #rrggbb -> "vec3(r, g, b)" in linear-ish sRGB literals, for inlining into GLSL. */
 export function glslColor(hex: string): string {
@@ -101,8 +101,26 @@ export const BURN_PHASE_GLSL = /* glsl */ `
   }
 `
 
-/** All three chunks, in dependency order. Most consumers want exactly this. */
-export const BURN_SHADING_GLSL = NOISE_GLSL + BLACKBODY_GLSL + BURN_PHASE_GLSL
+/**
+ * `float gust(float t, float windSpeed)` — a slow multiplier around 1.0.
+ *
+ * Two sines an irrational ratio apart so the surge never settles into an
+ * obvious loop, scaled by wind speed so a still day barely breathes. Shared by
+ * the flames and the trees' emissive: when each invented its own the fire
+ * looked busy rather than blown, which is the whole reason this is one
+ * function instead of two.
+ */
+export const GUST_GLSL = /* glsl */ `
+  float gust(float t, float windSpeed) {
+    float amount = clamp(windSpeed / ${f(GUST.refSpeed)}, 0.0, 1.0) * ${f(GUST.depth)};
+    float w = 0.6 * sin(t * ${f(GUST.hz * 6.28318530718)})
+            + 0.4 * sin(t * ${f(GUST.hz * 6.28318530718 * 1.618)} + 1.7);
+    return 1.0 + amount * w;
+  }
+`
+
+/** All four chunks, in dependency order. Most consumers want exactly this. */
+export const BURN_SHADING_GLSL = NOISE_GLSL + BLACKBODY_GLSL + BURN_PHASE_GLSL + GUST_GLSL
 
 // ------------------------------------------------------------ CPU mirrors
 

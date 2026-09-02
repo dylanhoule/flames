@@ -428,7 +428,7 @@ function Trees(props: SceneProps & { terrain: TerrainField }) {
 }
 
 function SpeciesGroup({
-  terrain, forest, sim, seed, species, onIgnite,
+  terrain, forest, sim, seed, species, onIgnite, wind,
 }: SceneProps & { species: Species }) {
   const foliageRef = useRef<THREE.InstancedMesh>(null)
   const trunkRef = useRef<THREE.InstancedMesh>(null)
@@ -535,14 +535,33 @@ function SpeciesGroup({
     trk.computeBoundingSphere()
   }, [trees, species])
 
+  // Seconds each charred tree has been cooling, normalised 0..1 over
+  // BURN.emberCoolSeconds. Kept here rather than derived from the sim because
+  // the sim has no notion of it: progress stops dead at 1 when a cell chars.
+  const afterglow = useMemo(() => new Float32Array(Math.max(trees.length, 1)), [trees.length])
+
   // Per-frame: push burn progress into the instance attribute.
-  useFrame(() => {
+  useFrame((_, rawDelta) => {
     if (!sim) return
+    const delta = Math.min(rawDelta, 0.1)
     const arr = burnAttr.array as Float32Array
     let changed = false
     trees.forEach((t, i) => {
       const state = sim.states[t.cell.id]
-      const p = state === CHARRED ? 1 : state === BURNING ? sim.progress[t.cell.id]! : 0
+      let p: number
+      if (state === CHARRED) {
+        // Past 1 the attribute stops meaning "burn progress" and starts
+        // meaning "how long ago this finished burning". Every consumer of
+        // vBurn already saturates at 1 (the phase curve settles to its
+        // smoulder level, the front and the shrink are long since clamped),
+        // so the extra range costs nothing and the ember cracks get the one
+        // signal they need in order to go out.
+        afterglow[i] = Math.min(1, afterglow[i]! + delta / BURN.emberCoolSeconds)
+        p = 1 + afterglow[i]!
+      } else {
+        afterglow[i] = 0
+        p = state === BURNING ? sim.progress[t.cell.id]! : 0
+      }
       if (arr[i] !== p) { arr[i] = p; changed = true }
     })
     if (changed) burnAttr.needsUpdate = true
@@ -566,7 +585,7 @@ function SpeciesGroup({
           onIgnite?.(tree.cell.id)
         }}
       >
-        <BurnMaterial shrink />
+        <BurnMaterial shrink windSpeed={wind.speed} />
       </instancedMesh>
       <instancedMesh
         ref={trunkRef}
@@ -575,7 +594,7 @@ function SpeciesGroup({
         receiveShadow
         frustumCulled={false}
       >
-        <BurnMaterial shrink={false} />
+        <BurnMaterial shrink={false} windSpeed={wind.speed} />
       </instancedMesh>
     </group>
   )
@@ -619,6 +638,7 @@ function burnMaterialImpl(shrink: boolean) {
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 }
+    shader.uniforms.uWindSpeed = { value: 0 }
     ;(mat.userData as { shader?: THREE.WebGLProgramParametersWithUniforms }).shader = shader
 
     shader.vertexShader = shader.vertexShader
@@ -678,6 +698,7 @@ function burnMaterialImpl(shrink: boolean) {
         '#include <common>',
         `#include <common>
          uniform float uTime;
+         uniform float uWindSpeed;
          varying float vBurn;
          varying float vSeed;
          varying float vHeight;
@@ -743,7 +764,14 @@ function burnMaterialImpl(shrink: boolean) {
          // Scaled well below 1: a crack is a glowing vein of charcoal, not a
          // flame core. Left at full strength every crack fragment reached the
          // white end of the blackbody ramp and the char read as white blobs.
-         float crackHeat = crack * pulse * mix(1.0, 0.5, smoulderT)
+         // Afterglow: vBurn keeps climbing past 1 once the cell has charred,
+         // so this is time since the fire went out, not burn progress.
+         // Without it smoulderT saturates the moment a tree chars and the
+         // veins pulse at the same brightness forever, leaving a burnt-out
+         // forest permanently lit.
+         float cooled = clamp(vBurn - 1.0, 0.0, 1.0);
+         float emberLife = mix(1.0, ${f(BURN.emberFloor)}, cooled);
+         float crackHeat = crack * pulse * mix(1.0, 0.5, smoulderT) * emberLife
            * step(0.001, belowFront) * ${f(BURN.crackHeat)};
 
          // --- multi-octave flicker, per-instance phase (item 6) --------
@@ -754,6 +782,10 @@ function burnMaterialImpl(shrink: boolean) {
          float flicker = 1.0
            + ${f(BURN.flickerDepth * 0.6)} * sin(uTime * ${f(BURN.flickerHz)} + vSeed * 41.0)
            + ${f(BURN.flickerDepth * 0.4)} * sin(uTime * ${f(BURN.flickerHz * 2.3)} + vSeed * 7.0 + vHeight * 3.0);
+
+         // The slow wind-driven surge, shared with the flame billboards so the
+         // whole fire breathes on one clock.
+         flicker *= gust(uTime, uWindSpeed);
 
          float temp = clamp(max(heat, crackHeat), 0.0, 1.0);
          vec3 hot = blackbody(temp) * ${f(BURN.emissivePeak)} * flicker;
@@ -778,11 +810,13 @@ function burnMaterialImpl(shrink: boolean) {
 }
 
 /** Thin React wrapper so the patched material can be declared as JSX. */
-function BurnMaterial({ shrink }: { shrink: boolean }) {
+function BurnMaterial({ shrink, windSpeed }: { shrink: boolean; windSpeed: number }) {
   const mat = useMemo(() => burnMaterialImpl(shrink), [shrink])
   useFrame((state) => {
     const shader = (mat.userData as { shader?: THREE.WebGLProgramParametersWithUniforms }).shader
-    if (shader) shader.uniforms.uTime!.value = state.clock.elapsedTime
+    if (!shader) return
+    shader.uniforms.uTime!.value = state.clock.elapsedTime
+    shader.uniforms.uWindSpeed!.value = windSpeed
   })
   useEffect(() => () => mat.dispose(), [mat])
   return <primitive object={mat} attach="material" />

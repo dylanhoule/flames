@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { burnFront, burnIntensity } from './burnShading'
-import { BURN } from './visual'
+import { BURN, GUST } from './visual'
 
 /**
  * The curve is the contract four subsystems share, so what is worth pinning is
@@ -60,5 +60,14 @@ describe('burnFront', () => {
     for (let i = 1; i <= 200; i++) {
       expect(burnFront(i / 200)).toBeGreaterThanOrEqual(burnFront((i - 1) / 200) - 1e-9)
     }
+  })
+})
+
+describe('gust tokens', () => {
+  it('keeps the surge multiplier positive at every wind speed', () => {
+    // The gust multiplies intensity, so a depth that could drive it to or past
+    // zero would blink the whole fire out at the bottom of a cycle.
+    const worst = 1 - GUST.depth
+    expect(worst).toBeGreaterThan(0)
   })
 })

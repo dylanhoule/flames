@@ -103,6 +103,22 @@ export const STRATA = [
   { thickness: 0.38, color: '#b9b3a6' }, // pale base
 ] as const
 
+/**
+ * Slow wind-driven gusting, shared by the flames and the trees' own emissive
+ * so the whole fire breathes together rather than each part wobbling on its
+ * own clock. Depth scales with wind speed: a still day barely pulses, a windy
+ * one surges. Much slower than the per-tree flicker, which is what separates
+ * "the fire is being blown" from "the fire is noisy".
+ */
+export const GUST = {
+  /** Cycles per second. Deliberately well under 1: this is breath, not flicker. */
+  hz: 0.22,
+  /** Peak +/- fraction of intensity swing, reached at refSpeed. */
+  depth: 0.3,
+  /** Wind speed in m/s at which the gust reaches full depth. */
+  refSpeed: 8,
+} as const
+
 /** Ground darkening left behind by fire, plus the heat that fades out of it. */
 export const SCORCH = {
   color: '#241d18',
@@ -218,6 +234,19 @@ export const BURN = {
   /** Noise above this reads as a crack. Higher means fewer, sparser veins. */
   crackThreshold: 0.62,
   crackPulseHz: 0.9,
+  /**
+   * Seconds for the ember cracks in a charred tree to cool from their
+   * smoulder brightness to the residual floor.
+   *
+   * This needs a time signal the burn progress cannot give: a cell's progress
+   * stops at exactly 1 the moment it chars and never moves again, so anything
+   * keyed off it alone pulses at the same brightness for the rest of the
+   * session and a forest that burned out minutes ago still glows. The Scene
+   * keeps counting past 1 into an afterglow term for precisely this.
+   */
+  emberCoolSeconds: 12,
+  /** Brightness cracks settle at once cooled, as a fraction of their peak. */
+  emberFloor: 0.12,
   /**
    * How far up the blackbody ramp an ember crack reaches. Deliberately low:
    * a crack is glowing charcoal, not a flame core, and at full strength every
