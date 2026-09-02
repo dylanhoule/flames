@@ -8,3 +8,5 @@ dist/
 # including context/learning/, out of the repo.
 /context
 /context/learning
+
+.claude/worktrees/
